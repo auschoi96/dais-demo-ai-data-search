@@ -1,0 +1,20 @@
+{"service_id": "s01", "name": "Yape Loans", "category": "Credit", "icon": "💰", "description": "Instant loan up to S/ 3,000 with no paperwork."}
+{"service_id": "s02", "name": "Claro Recharge", "category": "Top-ups", "icon": "📱", "description": "Recharge any Claro mobile line instantly."}
+{"service_id": "s03", "name": "Entel Recharge", "category": "Top-ups", "icon": "📡", "description": "Recharge your Entel line with discounts."}
+{"service_id": "s04", "name": "Electricity Payment (Enel)", "category": "Utilities", "icon": "⚡", "description": "Pay your electricity bill without waiting in line."}
+{"service_id": "s05", "name": "Water Payment (SEDAPAL)", "category": "Utilities", "icon": "💧", "description": "Pay your water bill instantly."}
+{"service_id": "s06", "name": "Rappi Pay", "category": "Delivery", "icon": "🛵", "description": "Pay on Rappi with Yape and earn cashback."}
+{"service_id": "s07", "name": "PedidosYa", "category": "Delivery", "icon": "🍔", "description": "Pay for food delivery without a card."}
+{"service_id": "s08", "name": "Yape Savings Fund", "category": "Investments", "icon": "📈", "description": "Invest from S/ 10 and earn daily returns."}
+{"service_id": "s09", "name": "Accident Insurance", "category": "Insurance", "icon": "🛡️", "description": "Personal accident insurance from S/ 5/month."}
+{"service_id": "s10", "name": "Netflix Payment", "category": "Streaming", "icon": "🎬", "description": "Pay your Netflix subscription with Yape."}
+{"service_id": "s11", "name": "Spotify Payment", "category": "Streaming", "icon": "🎵", "description": "Pay Spotify Premium monthly."}
+{"service_id": "s12", "name": "Digital SOAT", "category": "Insurance", "icon": "🚗", "description": "Get your vehicle SOAT insurance in 2 minutes."}
+{"service_id": "s13", "name": "Transfer to BCP", "category": "Transfers", "icon": "🏦", "description": "Transfer for free to BCP bank accounts."}
+{"service_id": "s14", "name": "School Tuition Payment", "category": "Education", "icon": "🏫", "description": "Pay monthly fees at affiliated schools."}
+{"service_id": "s15", "name": "Yape Business", "category": "Business", "icon": "🏪", "description": "Accept payments and manage your business."}
+{"service_id": "s16", "name": "Online Clinic", "category": "Health", "icon": "🩺", "description": "Virtual doctor consultation from S/ 25."}
+{"service_id": "s17", "name": "Wong Supermarket", "category": "Supermarkets", "icon": "🛒", "description": "Pay at Wong and earn bonus points."}
+{"service_id": "s18", "name": "InDriver Pay", "category": "Transport", "icon": "🚕", "description": "Pay InDriver rides with Yape."}
+{"service_id": "s19", "name": "Gas Payment (Cálidda)", "category": "Utilities", "icon": "🔥", "description": "Pay your home gas bill."}
+{"service_id": "s20", "name": "Yape QR Payments", "category": "Business", "icon": "📲", "description": "Generate a QR code to get paid at your business."}

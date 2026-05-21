@@ -1,0 +1,13 @@
+.DS_Store
+node_modules/
+client/dist/
+dist/
+build/
+.env
+.databricks/
+.smoke-test/
+test-results/
+playwright-report/
+__pycache__/
+*.pyc
+setup/__pycache__/

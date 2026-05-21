@@ -1,0 +1,15 @@
+{"query": "claro recharge", "language": "EN", "expected_service_ids": ["s02"], "tier": "easy"}
+{"query": "recarga claro", "language": "ES", "expected_service_ids": ["s02"], "tier": "easy"}
+{"query": "pay electricity bill", "language": "EN", "expected_service_ids": ["s04"], "tier": "medium"}
+{"query": "pago de luz", "language": "ES", "expected_service_ids": ["s04"], "tier": "medium"}
+{"query": "I want to save money", "language": "EN", "expected_service_ids": ["s08"], "tier": "hard"}
+{"query": "quiero ahorrar", "language": "ES", "expected_service_ids": ["s08"], "tier": "hard"}
+{"query": "send money to my mom", "language": "EN", "expected_service_ids": ["s13"], "tier": "hard"}
+{"query": "enviar plata a mi mamá", "language": "ES", "expected_service_ids": ["s13"], "tier": "hard"}
+{"query": "I need to pay off debt", "language": "EN", "expected_service_ids": ["s01"], "tier": "hard"}
+{"query": "online doctor visit", "language": "EN", "expected_service_ids": ["s16"], "tier": "hard"}
+{"query": "doctor por internet", "language": "ES", "expected_service_ids": ["s16"], "tier": "hard"}
+{"query": "I sell on the street and get paid on my phone", "language": "EN", "expected_service_ids": ["s20"], "tier": "hard"}
+{"query": "netflix subscription", "language": "EN", "expected_service_ids": ["s10"], "tier": "medium"}
+{"query": "protection if I get in an accident", "language": "EN", "expected_service_ids": ["s09"], "tier": "hard"}
+{"query": "pay school tuition", "language": "EN", "expected_service_ids": ["s14"], "tier": "medium"}

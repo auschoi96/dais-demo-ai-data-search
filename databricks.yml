@@ -1,0 +1,78 @@
+bundle:
+  name: dais-demo-ai-data-search
+
+variables:
+  catalog:
+    description: Unity Catalog name for Yape demo tables
+    default: ac_demo
+  schema:
+    description: Unity Catalog schema for Yape demo tables
+    default: agents
+  sql_warehouse_id:
+    description: SQL warehouse ID for analytics queries and keyword search
+  budget_policy_id:
+    description: Optional budget policy for existing apps (leave unset for new apps)
+
+resources:
+  apps:
+    app:
+      name: dais-demo-ai-data-search
+      description: Yape AI-ready search demo — vibe coding vs AI-ready data
+      source_code_path: ./
+      budget_policy_id: ${var.budget_policy_id}
+      user_api_scopes:
+        - sql
+
+      resources:
+        - name: sql-warehouse
+          sql_warehouse:
+            id: ${var.sql_warehouse_id}
+            permission: CAN_USE
+
+        - name: services-raw-table
+          uc_securable:
+            securable_type: TABLE
+            securable_full_name: ${var.catalog}.${var.schema}.yape_services_raw
+            permission: SELECT
+
+        - name: services-enriched-table
+          uc_securable:
+            securable_type: TABLE
+            securable_full_name: ${var.catalog}.${var.schema}.yape_services_enriched
+            permission: SELECT
+
+        - name: search-eval-table
+          uc_securable:
+            securable_type: TABLE
+            securable_full_name: ${var.catalog}.${var.schema}.yape_search_eval
+            permission: SELECT
+
+        - name: search-function
+          uc_securable:
+            securable_type: FUNCTION
+            securable_full_name: ${var.catalog}.${var.schema}.search_yape_services
+            permission: EXECUTE
+
+targets:
+  dev:
+    default: true
+    mode: development
+    workspace:
+      host: https://e2-demo-field-eng.cloud.databricks.com
+
+    variables:
+      catalog: ac_demo
+      schema: agents
+      sql_warehouse_id: "01370556fad60fda"
+      budget_policy_id: "5b62fa02-8671-46d3-96ac-64c1725dc9d9"
+
+  prod:
+    mode: production
+    workspace:
+      host: https://e2-demo-field-eng.cloud.databricks.com
+
+    variables:
+      catalog: ac_demo
+      schema: agents
+      sql_warehouse_id: "01370556fad60fda"
+      budget_policy_id: "5b62fa02-8671-46d3-96ac-64c1725dc9d9"
