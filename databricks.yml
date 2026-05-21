@@ -12,6 +12,12 @@ variables:
     description: SQL warehouse ID for analytics queries and keyword search
   budget_policy_id:
     description: Optional budget policy for existing apps (leave unset for new apps)
+  mlflow_experiment_id:
+    description: |
+      Experiment ID both agents trace into. DABs grants the app CAN_EDIT on it
+      at deploy time; the experiment must already exist (the deploy fails with a
+      404 otherwise). Create it via the MLflow UI or `mlflow experiments create`.
+    default: "2177684156462207"
 
 resources:
   apps:
@@ -98,10 +104,20 @@ resources:
             name: databricks-claude-opus-4-6
             permission: CAN_QUERY
 
+        - name: mlflow-experiment
+          experiment:
+            experiment_id: ${var.mlflow_experiment_id}
+            permission: CAN_EDIT
+
 targets:
   dev:
     default: true
     mode: development
+    # Disable the default [dev <user>] name prefix so DABs binds to the
+    # already-existing experiment at mlflow_experiment_path (id 2177684156462207)
+    # instead of creating a parallel renamed copy each deploy.
+    presets:
+      name_prefix: ""
     workspace:
       host: https://e2-demo-field-eng.cloud.databricks.com
 

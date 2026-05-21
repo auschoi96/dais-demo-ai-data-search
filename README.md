@@ -92,6 +92,8 @@ Workspace previews to enable (Admin Console → Previews — verify with `python
 - `ai-gateway`
 - `mcp.functions` *(the scope `uc_function` tool calls actually require — see notes for the `unity-catalog` red-herring)*
 
+You also need an existing **MLflow experiment** both agents trace into. The DABs bundle grants the app `CAN_EDIT` on the experiment ID supplied via the `mlflow_experiment_id` variable (default `2177684156462207` = `/Users/austin.choi@databricks.com/dais-demo-ai-data-ready`). Create the experiment first via the MLflow UI or `mlflow experiments create -n /Users/<you>/<name>` — the deploy fails fast if the ID doesn't resolve.
+
 ### 1. Authenticate
 
 ```bash
@@ -154,6 +156,7 @@ npm run dev:client     # if configured; otherwise just npm run build:client and 
 | `schema` | `agents` | UC schema |
 | `sql_warehouse_id` | *(required per target)* | Warehouse the app uses for `execute_sql` and the UC functions |
 | `budget_policy_id` | *(per-target)* | Required for some workspaces' app updates |
+| `mlflow_experiment_id` | `2177684156462207` | Experiment both agents trace into. Must already exist; bundle grants `CAN_EDIT`. |
 
 ---
 
@@ -190,6 +193,21 @@ npm run dev:client     # if configured; otherwise just npm run build:client and 
 | Embeddings (Vector Search managed) | `databricks-qwen3-embedding-0-6b` |
 
 All routed through `https://<workspace>/ai-gateway/anthropic` with the `x-databricks-use-coding-agent-mode: true` header. The app's service principal exchanges its OAuth credentials for a Bearer token via the Databricks SDK at request time and passes that as `ANTHROPIC_AUTH_TOKEN` to the bundled `claude` CLI inside `claude-agent-sdk`.
+
+## Tracing
+
+Every agent run emits one MLflow trace into the experiment configured at `MLFLOW_EXPERIMENT_ID` (injected by `app.yaml`'s `valueFrom: mlflow-experiment`).
+
+Span shape:
+
+```
+agent.<vibe|ready>          (AGENT)   attrs: model, query, tokens, cost_usd, latency_ms, num_tool_calls
+└── tool.<tool_name>        (TOOL)    inputs: args  outputs: { output }
+└── tool.<tool_name>        (TOOL)
+└── ...
+```
+
+`mlflow.anthropic.autolog()` doesn't help here — `claude-agent-sdk` makes its HTTP calls from a bundled CLI subprocess that autolog can't patch. We emit spans manually in `python/agents_service/tracing.py` from the events the runner already produces, with input/output truncation at 4 KB so big metric-view payloads don't blow up the trace. If `MLFLOW_EXPERIMENT_ID` is unset, tracing silently disables and the rest of the app keeps working.
 
 ---
 

@@ -132,8 +132,9 @@ Embedding model: `databricks-qwen3-embedding-0-6b` (managed). Pipeline: `TRIGGER
 |---|---|
 | `auth.py` | Reads the app's SP credentials via the Databricks SDK, exchanges them for a workspace OAuth bearer, returns the env dict that `claude-agent-sdk` needs (base URL, auth token, model, custom header, model defaults). |
 | `tools.py` | All MCP tool definitions. Two `create_sdk_mcp_server()` calls produce `VIBE_TOOLS` and `READY_TOOLS`. The whitelist `METRIC_VIEW_CATALOG` is the source of truth for `query_metric_view`'s allowed dim/measure names. |
-| `runner.py` | `stream_both(query, model)` → `AsyncIterator[event]`. Spawns two `_run_one` tasks, one per agent, and merges events through a shared `asyncio.Queue`. Each task forwards `AssistantMessage` / `UserMessage` / `ResultMessage` into typed SSE events. |
-| `main.py` | FastAPI app — routes + SSE wrapper via `sse_starlette.EventSourceResponse`. Mounts `client/dist/` as static. |
+| `runner.py` | `stream_both(query, model)` → `AsyncIterator[event]`. Spawns two `_run_one` tasks, one per agent, and merges events through a shared `asyncio.Queue`. Each task forwards `AssistantMessage` / `UserMessage` / `ResultMessage` into typed SSE events, buffers a copy of the events, and emits an MLflow trace when the run reaches `ResultMessage` (or errors). |
+| `tracing.py` | Manual MLflow span emission. `init_tracing()` runs at app startup (reads `MLFLOW_EXPERIMENT_ID`, sets tracking URI). `emit_agent_trace(...)` walks buffered events and builds a root agent span + child tool spans with truncated inputs/outputs. No-op if `MLFLOW_EXPERIMENT_ID` is unset. |
+| `main.py` | FastAPI app — routes + SSE wrapper via `sse_starlette.EventSourceResponse`. Calls `init_tracing()` at import time. Mounts `client/dist/` as static. |
 
 ### Event types emitted to the client
 
@@ -207,7 +208,12 @@ resources:
         - fn-list-services-by-category (EXECUTE)
         - fn-services-for-segment (EXECUTE)
         - opus-endpoint → databricks-claude-opus-4-6 (CAN_QUERY)
+        - mlflow-experiment → ${var.mlflow_experiment_id} (CAN_EDIT)
 ```
+
+The MLflow experiment is referenced **by ID** (variable `mlflow_experiment_id`, default `2177684156462207`) rather than created via a top-level `experiments:` resource. Reason: in `mode: development`, DABs auto-prefixes resource names with `[dev <user>]`, which forks the experiment path and creates a new ID instead of binding to the existing one. Referencing by ID sidesteps that. Trade-off: the experiment must exist before deploy — bundle deploy fails fast with a 404 if not.
+
+Both targets also set `presets.name_prefix: ""` to keep other resources (tables, schemas) at their canonical names in dev — this demo lives on a single workspace where the dev/prod distinction is cosmetic.
 
 Both targets (`dev`, `prod`) point at `e2-demo-field-eng` with warehouse `01370556fad60fda` (TPCDS_L).
 
@@ -332,7 +338,26 @@ The Databricks Apps build phase auto-detects both `requirements.txt` and `packag
 
 Net effect: every deploy spends ~20s on a build that produces some artifacts we throw away. Removing `server/`, `package.json`'s `build:server` script, and tightening `package.json` to client-only would clean this up — follow-up cleanup task.
 
-### 12. Cancel-scope warning on agent teardown
+### 12. MLflow tracing must be manual for `claude-agent-sdk`
+
+**Symptom:** Wanted both agents to emit traces into a specific experiment. Calling `mlflow.anthropic.autolog()` and `mlflow.openai.autolog()` in our FastAPI process produced no traces.
+
+**Cause:** Both autolog functions patch in-process SDK clients. `claude-agent-sdk` spawns a `claude` CLI subprocess that makes its own HTTP calls — autolog has no way to instrument that subprocess.
+
+**Fix:** Manual span emission from `python/agents_service/tracing.py`. The runner already buffers SSE events for forwarding to the client; we reuse that buffer at `ResultMessage` time to build a span tree:
+
+```
+agent.<vibe|ready>        (AGENT) — root, attrs: model, query, tokens, cost, latency
+├── tool.<tool_name>      (TOOL)  — inputs=args, outputs=output (truncated to 4KB)
+├── tool.<tool_name>      (TOOL)
+└── ...
+```
+
+The experiment ID is injected via `app.yaml`'s `valueFrom: mlflow-experiment` resource, which DABs grants the app `CAN_EDIT` on. `mlflow.set_tracking_uri("databricks")` runs at import time. If `MLFLOW_EXPERIMENT_ID` is unset, tracing silently no-ops.
+
+Trace destination is the experiment's UC table. The new MLflow tracing API requires `MLFLOW_TRACING_SQL_WAREHOUSE_ID` to be set on the *reader* side (e.g. when calling `mlflow.search_traces(...)` from a notebook or script) — the app itself doesn't need it because writes happen via the OpenTelemetry exporter that ships with `mlflow-skinny`.
+
+### 13. Cancel-scope warning on agent teardown
 
 When the SSE stream closes mid-run (user disconnects, frontend aborts), `claude-agent-sdk`'s underlying anyio generator may raise `RuntimeError: Attempted to exit cancel scope in a different task than it was entered in`. The error is cosmetic — the events already produced are intact, the `done` event has already been forwarded. Future work: a clean shutdown path.
 

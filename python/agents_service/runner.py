@@ -36,6 +36,7 @@ from .tools import (
     VIBE_ALLOWED,
     VIBE_TOOLS,
 )
+from .tracing import emit_agent_trace
 
 
 AgentKind = Literal["vibe", "ready"]
@@ -146,13 +147,22 @@ async def _run_one(
     started = time.monotonic()
     await out.put({"type": "session_start", "agent": agent, "ts": started})
     num_tool_calls = 0
+    # Buffer the run's events for trace emission after the session completes.
+    buffered: list[dict[str, Any]] = []
+    final_text_parts: list[str] = []
+
+    async def emit(evt: dict[str, Any]) -> None:
+        buffered.append(evt)
+        await out.put(evt)
+
     try:
         async for msg in query(prompt=user_query, options=_options(agent, model)):
             if isinstance(msg, AssistantMessage):
                 for block in msg.content:
                     btype = type(block).__name__
                     if btype == "TextBlock" and getattr(block, "text", ""):
-                        await out.put({
+                        final_text_parts.append(block.text)
+                        await emit({
                             "type": "text_delta",
                             "agent": agent,
                             "text": block.text,
@@ -162,7 +172,7 @@ async def _run_one(
                         short = getattr(block, "name", "")
                         if "__" in short:
                             short = short.split("__")[-1]
-                        await out.put({
+                        await emit({
                             "type": "tool_call",
                             "agent": agent,
                             "tool": short,
@@ -175,7 +185,7 @@ async def _run_one(
                 for block in content:
                     if type(block).__name__ == "ToolResultBlock":
                         output = _extract_tool_result_text(getattr(block, "content", ""))
-                        await out.put({
+                        await emit({
                             "type": "tool_result",
                             "agent": agent,
                             "call_id": getattr(block, "tool_use_id", ""),
@@ -189,22 +199,47 @@ async def _run_one(
                     usage.get("total_tokens")
                     or (usage.get("input_tokens", 0) + usage.get("output_tokens", 0))
                 )
-                await out.put({
+                cost = float(msg.total_cost_usd or 0.0)
+                final_answer = "\n".join(final_text_parts).strip()
+                await emit({
                     "type": "done",
                     "agent": agent,
                     "tokens": tokens,
-                    "cost_usd": float(msg.total_cost_usd or 0.0),
+                    "cost_usd": cost,
                     "latency_ms": latency_ms,
                     "num_tool_calls": num_tool_calls,
                 })
+                emit_agent_trace(
+                    agent=agent,
+                    model=model,
+                    query=user_query,
+                    final_answer=final_answer,
+                    events=buffered,
+                    tokens=tokens,
+                    cost_usd=cost,
+                    latency_ms=latency_ms,
+                )
                 return
     except Exception as exc:
-        await out.put({
+        latency_ms = int((time.monotonic() - started) * 1000)
+        err_msg = f"{type(exc).__name__}: {exc}"
+        await emit({
             "type": "error",
             "agent": agent,
-            "message": f"{type(exc).__name__}: {exc}",
-            "latency_ms": int((time.monotonic() - started) * 1000),
+            "message": err_msg,
+            "latency_ms": latency_ms,
         })
+        emit_agent_trace(
+            agent=agent,
+            model=model,
+            query=user_query,
+            final_answer="\n".join(final_text_parts).strip(),
+            events=buffered,
+            tokens=0,
+            cost_usd=0.0,
+            latency_ms=latency_ms,
+            error=err_msg,
+        )
 
 
 async def stream_both(

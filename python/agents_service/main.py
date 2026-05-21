@@ -19,6 +19,7 @@ from sse_starlette.sse import EventSourceResponse
 
 from .runner import stream_both
 from .tools import _run_sql
+from .tracing import init_tracing
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -26,6 +27,10 @@ CLIENT_DIST = ROOT / "client" / "dist"
 
 
 app = FastAPI(title="Yape Agents", version="2.0.0")
+
+# Configure MLflow tracing once at import time (no-op if MLFLOW_EXPERIMENT_ID
+# is unset). Both agents' traces land in this experiment.
+init_tracing()
 
 
 @app.post("/api/agents/stream")
