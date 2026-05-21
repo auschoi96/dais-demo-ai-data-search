@@ -1,5 +1,5 @@
+import { useEffect, useState } from 'react';
 import {
-  useAnalyticsQuery,
   Badge,
   Card,
   CardContent,
@@ -9,29 +9,48 @@ import {
 } from '@databricks/appkit-ui/react';
 
 interface BenchmarkRow {
-  tier: string;
+  agent: string;
+  label: string;
   hit_at_4: number;
-  mrr: number;
+  avg_tool_calls: number;
   avg_latency_ms: number;
 }
 
-const TIER_META = [
-  { tier: 'tier0', label: 'Tier 0 — Keyword', note: 'Vibe-coded substring search' },
-  { tier: 'tier1', label: 'Tier 1 — VS Raw', note: 'Vector Search on thin catalog copy' },
-  { tier: 'tier2', label: 'Tier 2 — VS Enriched', note: 'AI-ready embedding_text column' },
-  { tier: 'tier3', label: 'Tier 3 — Supervisor', note: 'Opus 4.7 + UC function on raw index' },
-];
-
 export function BenchmarkPage() {
-  const { data, loading, error } = useAnalyticsQuery('benchmark_summary');
-  const rows = (data ?? []) as BenchmarkRow[];
+  const [rows, setRows] = useState<BenchmarkRow[] | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch('/api/benchmark');
+        const payload = await res.json();
+        if (cancelled) return;
+        if (!payload.ok) {
+          setError(payload.error ?? `HTTP ${res.status}`);
+        } else {
+          setRows(payload.rows as BenchmarkRow[]);
+        }
+      } catch (err) {
+        if (!cancelled) setError(err instanceof Error ? err.message : 'Failed to load');
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   return (
     <div className="max-w-6xl mx-auto p-6 space-y-6">
       <div>
-        <h2 className="text-2xl font-bold">Search Benchmark</h2>
+        <h2 className="text-2xl font-bold">Agent Benchmark</h2>
         <p className="text-muted-foreground mt-1">
-          Hit@4 and MRR on labeled queries — run <code>python eval/run_benchmark.py</code> to refresh live numbers.
+          Hit@4, avg tool calls, and avg wall time across the labeled analytical queries.
+          Run <code>python eval/run_agent_eval.py</code> to refresh.
         </p>
       </div>
 
@@ -40,36 +59,46 @@ export function BenchmarkPage() {
       )}
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        {TIER_META.map((meta) => {
-          const row = rows.find((item) => item.tier === meta.tier);
-          return (
-            <Card key={meta.tier} className="shadow-lg">
+        {loading && (
+          <>
+            <Skeleton className="h-32 w-full" />
+            <Skeleton className="h-32 w-full" />
+          </>
+        )}
+
+        {!loading &&
+          rows?.map((row) => (
+            <Card key={row.agent} className="shadow-lg">
               <CardHeader>
-                <CardTitle className="text-lg">{meta.label}</CardTitle>
+                <CardTitle className="text-lg flex items-center gap-2">
+                  <span
+                    className={`w-2 h-2 rounded-full ${row.agent === 'ready' ? 'bg-success' : 'bg-warning'}`}
+                  />
+                  {row.label}
+                </CardTitle>
               </CardHeader>
-              <CardContent className="space-y-3">
-                <p className="text-sm text-muted-foreground">{meta.note}</p>
-                {loading && <Skeleton className="h-20 w-full" />}
-                {!loading && row && (
-                  <div className="flex flex-wrap gap-2">
-                    <Badge variant="secondary">Hit@4: {(Number(row.hit_at_4) * 100).toFixed(0)}%</Badge>
-                    <Badge variant="secondary">MRR: {Number(row.mrr).toFixed(2)}</Badge>
-                    <Badge variant="outline">{Number(row.avg_latency_ms)} ms avg</Badge>
-                  </div>
-                )}
+              <CardContent>
+                <div className="flex flex-wrap gap-2">
+                  <Badge variant="secondary">Hit@4: {(row.hit_at_4 * 100).toFixed(0)}%</Badge>
+                  <Badge variant="secondary">Avg tool calls: {row.avg_tool_calls.toFixed(1)}</Badge>
+                  <Badge variant="outline">{(row.avg_latency_ms / 1000).toFixed(1)}s avg</Badge>
+                </div>
               </CardContent>
             </Card>
-          );
-        })}
+          ))}
       </div>
 
       <Card>
         <CardHeader>
-          <CardTitle>Presenter notes</CardTitle>
+          <CardTitle>Why the gap</CardTitle>
         </CardHeader>
         <CardContent className="text-sm text-muted-foreground space-y-2">
-          <p>Hero queries: <strong>I want to save money</strong> and <strong>quiero ahorrar</strong> → fail T0/T1/T3, succeed T2.</p>
-          <p>Tier 3 proves the agent stack works — the bottleneck is AI-ready data, not the model.</p>
+          <p>
+            Same model (Opus 4.6). Same prompt scaffolding. The vibe-coded agent has to
+            discover the schema and iterate on broken SQL. The AI-ready agent calls a
+            single governed metric view.
+          </p>
+          <p>The cost is data work done once, governed in UC, not re-done by every agent.</p>
         </CardContent>
       </Card>
     </div>

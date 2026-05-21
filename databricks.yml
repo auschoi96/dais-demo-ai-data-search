@@ -25,6 +25,7 @@ resources:
         - serving.serving-endpoints
         - vectorsearch.vector-search-indexes
         - ai-gateway
+        - mcp.functions
 
       resources:
         - name: sql-warehouse
@@ -50,15 +51,51 @@ resources:
             securable_full_name: ${var.catalog}.${var.schema}.yape_search_eval
             permission: SELECT
 
-        - name: search-function
+        - name: transactions-table
+          uc_securable:
+            securable_type: TABLE
+            securable_full_name: ${var.catalog}.${var.schema}.yape_transactions
+            permission: SELECT
+
+        - name: fn-search-raw
           uc_securable:
             securable_type: FUNCTION
             securable_full_name: ${var.catalog}.${var.schema}.search_yape_services
             permission: EXECUTE
 
+        - name: fn-search-enriched
+          uc_securable:
+            securable_type: FUNCTION
+            securable_full_name: ${var.catalog}.${var.schema}.search_yape_services_enriched
+            permission: EXECUTE
+
+        - name: fn-top-services-by-region
+          uc_securable:
+            securable_type: FUNCTION
+            securable_full_name: ${var.catalog}.${var.schema}.top_services_by_region
+            permission: EXECUTE
+
+        - name: fn-avg-ticket-by-cohort
+          uc_securable:
+            securable_type: FUNCTION
+            securable_full_name: ${var.catalog}.${var.schema}.avg_ticket_by_cohort
+            permission: EXECUTE
+
+        - name: fn-list-services-by-category
+          uc_securable:
+            securable_type: FUNCTION
+            securable_full_name: ${var.catalog}.${var.schema}.list_services_by_category
+            permission: EXECUTE
+
+        - name: fn-services-for-segment
+          uc_securable:
+            securable_type: FUNCTION
+            securable_full_name: ${var.catalog}.${var.schema}.services_for_segment
+            permission: EXECUTE
+
         - name: opus-endpoint
           serving_endpoint:
-            name: databricks-claude-opus-4-7
+            name: databricks-claude-opus-4-6
             permission: CAN_QUERY
 
 targets:

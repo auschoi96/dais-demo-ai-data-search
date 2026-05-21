@@ -1,51 +1,34 @@
 export const CATALOG = 'ac_demo';
 export const SCHEMA = 'agents';
 
-export const TABLES = {
-  raw: `${CATALOG}.${SCHEMA}.yape_services_raw`,
-  enriched: `${CATALOG}.${SCHEMA}.yape_services_enriched`,
-  eval: `${CATALOG}.${SCHEMA}.yape_search_eval`,
-} as const;
+export type AgentKind = 'vibe' | 'ready';
 
-export const INDEXES = {
-  raw: `${CATALOG}.${SCHEMA}.yape_services_raw_idx`,
-  enriched: `${CATALOG}.${SCHEMA}.yape_services_enriched_idx`,
-} as const;
-
-export const VS_ENDPOINT = 'yape-search-demo-endpoint';
-export const LLM_MODEL = 'databricks-claude-opus-4-7';
-export const UC_FUNCTION = `${CATALOG}.${SCHEMA}.search_yape_services`;
-
-export const TRACE_DESTINATION = {
-  catalog_name: CATALOG,
-  schema_name: SCHEMA,
-  table_prefix: 'yape_search',
-};
-
-export type SearchTier = '0' | '1' | '2' | '3';
-export type IndexVariant = 'raw' | 'enriched';
-
-export interface SearchResult {
-  service_id: string;
+export interface AgentToolCall {
+  call_id: string;
   name: string;
-  category: string;
-  description: string;
-  icon?: string;
-  score?: number;
-  tier: SearchTier;
-  latency_ms: number;
+  args: Record<string, unknown>;
+  output?: string;
+  is_error?: boolean;
+  started_at: number;
 }
 
-export interface SearchRequest {
-  query: string;
-  tier: SearchTier;
-  limit?: number;
+export interface AgentRunState {
+  agent: AgentKind;
+  status: 'idle' | 'running' | 'ok' | 'error';
+  tool_calls: AgentToolCall[];
+  text: string;
+  tokens: number;
+  cost_usd: number;
+  latency_ms: number;
+  started_at: number;
+  finished_at?: number;
+  error?: string;
 }
 
-export interface SearchResponse {
-  query: string;
-  tier: SearchTier;
-  results: SearchResult[];
-  latency_ms: number;
-  trace_url?: string;
-}
+export type StreamEvent =
+  | { type: 'session_start'; agent: AgentKind; ts: number }
+  | { type: 'text_delta'; agent: AgentKind; text: string }
+  | { type: 'tool_call'; agent: AgentKind; call_id: string; tool: string; args: Record<string, unknown> }
+  | { type: 'tool_result'; agent: AgentKind; call_id: string; output: string; is_error: boolean }
+  | { type: 'done'; agent: AgentKind; tokens: number; cost_usd: number; latency_ms: number; num_tool_calls: number }
+  | { type: 'error'; agent: AgentKind; message: string; latency_ms?: number };

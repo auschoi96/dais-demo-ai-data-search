@@ -56,7 +56,7 @@ Generated from `setup/generate_data.py` (hand-authored enrichments, not LLM-gene
 
 **Models:**
 
-- LLM: `databricks-claude-opus-4-7` (Supervisor API / Unity AI Gateway)
+- LLM: `databricks-claude-opus-4-6` (Supervisor API / Unity AI Gateway)
 - Embeddings: `databricks-qwen3-embedding-0-6b` (Vector Search managed)
 
 ### 3. AppKit app (Node.js + React)
@@ -135,7 +135,7 @@ resources:
         - services-enriched-table (SELECT)
         - search-eval-table (SELECT)
         - search-function (EXECUTE)
-        - opus-endpoint → databricks-claude-opus-4-7 (CAN_QUERY)
+        - opus-endpoint → databricks-claude-opus-4-6 (CAN_QUERY)
 
 targets:
   dev:   # default, mode: development
@@ -153,7 +153,7 @@ Both targets point at `e2-demo-field-eng` with warehouse `01370556fad60fda` (TPC
 | 0 | Keyword (vibe-coded) | SQL substring on `search_text` | Fail |
 | 1 | VS on raw data | Vector Search on `yape_services_raw_idx` | Fail |
 | 2 | VS on AI-ready data | Vector Search on `yape_services_enriched_idx` | **Succeed (~90% Hit@4)** |
-| 3 | Supervisor + Opus 4.7 | Unity AI Gateway + `search_yape_services` UC function on raw index | Fail (proves data is the bottleneck) |
+| 3 | Supervisor + Opus 4.6 | Unity AI Gateway + `search_yape_services` UC function on raw index | Fail (proves data is the bottleneck) |
 
 ---
 

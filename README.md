@@ -72,7 +72,7 @@ npm run dev
 | **0** | Keyword search on raw catalog (vibe-coded baseline) |
 | **1** | Vector Search on `yape_services_raw` |
 | **2** | Vector Search on `yape_services_enriched` (hero tier) |
-| **3** | Supervisor API + Opus 4.7 + UC function on raw index |
+| **3** | Supervisor API + Opus 4.6 + UC function on raw index |
 
 **Hero queries:** `I want to save money` and `quiero ahorrar` → fail T0/T1/T3, succeed T2.
 
@@ -104,7 +104,7 @@ Enable in Admin Console → Previews (check with `python setup/0_validate_previe
 
 ## Models
 
-- **LLM:** `databricks-claude-opus-4-7`
+- **LLM:** `databricks-claude-opus-4-6`
 - **Embeddings:** `databricks-qwen3-embedding-0-6b`
 
 ## Eval

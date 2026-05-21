@@ -1,5 +1,5 @@
+import { useEffect, useState } from 'react';
 import {
-  useAnalyticsQuery,
   Card,
   CardContent,
   CardHeader,
@@ -7,35 +7,6 @@ import {
   Skeleton,
   Badge,
 } from '@databricks/appkit-ui/react';
-
-export function DataComparePage() {
-  const raw = useAnalyticsQuery('services_raw');
-  const enriched = useAnalyticsQuery('services_enriched');
-  const rawRows = (raw.data ?? null) as ServiceRow[] | null;
-  const enrichedRows = (enriched.data ?? null) as ServiceRow[] | null;
-
-  return (
-    <div className="max-w-7xl mx-auto p-6 space-y-6">
-      <div>
-        <h2 className="text-2xl font-bold">Raw vs AI-Ready Data</h2>
-        <p className="text-muted-foreground mt-1">
-          Same 20 services — enriched rows add intent tags and bilingual user phrases for embedding.
-        </p>
-      </div>
-
-      <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
-        <ServiceColumn title="Raw catalog" loading={raw.loading} error={raw.error} rows={rawRows} mode="raw" />
-        <ServiceColumn
-          title="AI-ready enriched"
-          loading={enriched.loading}
-          error={enriched.error}
-          rows={enrichedRows}
-          mode="enriched"
-        />
-      </div>
-    </div>
-  );
-}
 
 interface ServiceRow {
   service_id: string;
@@ -45,7 +16,96 @@ interface ServiceRow {
   icon?: string;
   intent_tags?: string[];
   user_intent_phrases?: string[];
-  embedding_text?: string;
+}
+
+interface ApiResult {
+  ok: boolean;
+  error?: string;
+  columns: string[];
+  rows: (string | number | null)[][];
+}
+
+function shapeRows(payload: ApiResult): ServiceRow[] | null {
+  if (!payload?.ok) return null;
+  const cols = payload.columns;
+  return payload.rows.map((row) => {
+    const rec: Record<string, unknown> = {};
+    cols.forEach((c, i) => {
+      rec[c] = row[i];
+    });
+    const tags = rec.intent_tags;
+    const phrases = rec.user_intent_phrases;
+    return {
+      service_id: String(rec.service_id ?? ''),
+      name: String(rec.name ?? ''),
+      category: String(rec.category ?? ''),
+      description: String(rec.description ?? ''),
+      icon: rec.icon ? String(rec.icon) : undefined,
+      intent_tags: Array.isArray(tags) ? (tags as string[]) : undefined,
+      user_intent_phrases: Array.isArray(phrases) ? (phrases as string[]) : undefined,
+    };
+  });
+}
+
+function useServices(endpoint: string) {
+  const [rows, setRows] = useState<ServiceRow[] | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch(endpoint);
+        const payload = (await res.json()) as ApiResult;
+        if (cancelled) return;
+        if (!payload.ok) {
+          setError(payload.error ?? `HTTP ${res.status}`);
+          setRows(null);
+        } else {
+          setRows(shapeRows(payload));
+          setError(null);
+        }
+      } catch (err) {
+        if (!cancelled) setError(err instanceof Error ? err.message : 'Failed to load');
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [endpoint]);
+
+  return { rows, loading, error };
+}
+
+export function DataComparePage() {
+  const raw = useServices('/api/services/raw');
+  const enriched = useServices('/api/services/enriched');
+
+  return (
+    <div className="max-w-7xl mx-auto p-6 space-y-6">
+      <div>
+        <h2 className="text-2xl font-bold">Raw vs AI-Ready Data</h2>
+        <p className="text-muted-foreground mt-1">
+          Same 20 services — enriched rows add intent tags and bilingual user phrases for
+          embedding and metric joins.
+        </p>
+      </div>
+
+      <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
+        <ServiceColumn title="Raw catalog" loading={raw.loading} error={raw.error} rows={raw.rows} mode="raw" />
+        <ServiceColumn
+          title="AI-ready enriched"
+          loading={enriched.loading}
+          error={enriched.error}
+          rows={enriched.rows}
+          mode="enriched"
+        />
+      </div>
+    </div>
+  );
 }
 
 function ServiceColumn({

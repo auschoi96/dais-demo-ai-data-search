@@ -114,6 +114,23 @@ def main() -> None:
         """,
     )
 
+    exec_sql(
+        w,
+        f"""
+        CREATE OR REPLACE TABLE {TABLES['transactions']} (
+          txn_id STRING,
+          user_id STRING,
+          service_id STRING,
+          amount_pen DOUBLE,
+          txn_ts TIMESTAMP,
+          region STRING,
+          age_cohort STRING,
+          channel STRING
+        ) USING DELTA
+        COMMENT 'Synthetic Yape transactions — fact table for metric views'
+        """,
+    )
+
     raw_rows = load_jsonl(DATA_DIR / "services_raw.jsonl")
     raw_values = []
     for row in raw_rows:
@@ -186,6 +203,34 @@ def main() -> None:
             )
         )
     exec_sql(w, f"INSERT OVERWRITE {TABLES['eval']} VALUES\n  " + ",\n  ".join(eval_values))
+
+    txn_path = DATA_DIR / "transactions.jsonl"
+    if txn_path.exists():
+        txn_rows = load_jsonl(txn_path)
+        # Batch inserts: 8k rows in one VALUES clause is fine for serverless SQL,
+        # but split into chunks of 1000 to keep statement size sane.
+        chunk_size = 1000
+        for offset in range(0, len(txn_rows), chunk_size):
+            chunk = txn_rows[offset : offset + chunk_size]
+            values = []
+            for row in chunk:
+                values.append(
+                    "('{tid}', '{uid}', '{sid}', {amt}, TIMESTAMP '{ts}', '{region}', '{cohort}', '{channel}')".format(
+                        tid=sql_escape(row["txn_id"]),
+                        uid=sql_escape(row["user_id"]),
+                        sid=sql_escape(row["service_id"]),
+                        amt=float(row["amount_pen"]),
+                        ts=row["txn_ts"].replace("T", " ").split("+")[0].split("Z")[0],
+                        region=sql_escape(row["region"]),
+                        cohort=sql_escape(row["age_cohort"]),
+                        channel=sql_escape(row["channel"]),
+                    )
+                )
+            verb = "INSERT OVERWRITE" if offset == 0 else "INSERT INTO"
+            exec_sql(w, f"{verb} {TABLES['transactions']} VALUES\n  " + ",\n  ".join(values))
+        print(f"Loaded {len(txn_rows)} transactions in {(len(txn_rows) + chunk_size - 1) // chunk_size} batches")
+    else:
+        print(f"Skipping transactions load: {txn_path} not found. Run setup/generate_transactions.py first.")
 
     print("\nUC tables created and loaded:")
     for name in TABLES.values():

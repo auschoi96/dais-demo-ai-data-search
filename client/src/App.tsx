@@ -1,5 +1,5 @@
 import { createBrowserRouter, RouterProvider, NavLink, Outlet } from 'react-router';
-import { SearchPage } from './pages/search/SearchPage';
+import { AgentsPage } from './pages/agents/AgentsPage';
 import { BenchmarkPage } from './pages/benchmark/BenchmarkPage';
 import { DataComparePage } from './pages/compare/DataComparePage';
 
@@ -20,7 +20,7 @@ function Layout() {
         </div>
         <nav className="flex gap-1 ml-auto">
           <NavLink to="/" end className={navLinkClass}>
-            Search
+            Agents
           </NavLink>
           <NavLink to="/compare" className={navLinkClass}>
             Data Compare
@@ -42,7 +42,7 @@ const router = createBrowserRouter([
   {
     element: <Layout />,
     children: [
-      { path: '/', element: <SearchPage /> },
+      { path: '/', element: <AgentsPage /> },
       { path: '/compare', element: <DataComparePage /> },
       { path: '/benchmark', element: <BenchmarkPage /> },
     ],
