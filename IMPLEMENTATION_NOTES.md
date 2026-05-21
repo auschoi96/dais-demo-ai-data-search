@@ -1,364 +1,375 @@
-# Implementation Notes — DAIS AI-Ready Data Search Demo
+# Implementation Notes — DAIS AI-Ready Data Demo
 
-Reference document for what was built, how it was deployed, and known gotchas. Written after the initial implementation and first successful deployment to `e2-demo-field-eng`.
+Reference for what's built, how it's wired, and the non-obvious gotchas we hit. Read this after the [README](./README.md) when you need to extend the demo or debug a deploy.
 
-**GitHub:** https://github.com/auschoi96/dais-demo-ai-data-search  
-**Live app:** https://dais-demo-ai-data-search-1444828305810485.aws.databricksapps.com  
+**Repo:** https://github.com/auschoi96/dais-demo-ai-data-search
+**Live app:** https://dais-demo-ai-data-search-1444828305810485.aws.databricksapps.com
 **Workspace UI:** https://e2-demo-field-eng.cloud.databricks.com/apps-v2/app/dais-demo-ai-data-search/overview?o=1444828305810485
 
 ---
 
 ## Goal
 
-Build a **Yape search demo** for a presentation on **Vibe Coding vs AI-Ready Data**, proving that search improves when structured data is semantic, governed, and vectorized — not just when you add a better agent.
+Make a stage audience feel that **"AI-ready data" is the leverage**, not the agent. Same Claude model. Same prompt scaffolding. Two agents, two tool surfaces. The one with governed metric views and enriched Vector Search consistently outperforms raw-SQL on wall time, tool calls, and tokens — for the analytical Yape fintech questions the demo asks.
 
-The demo compares four search tiers with measurable Hit@4/MRR on labeled queries. Hero queries: `I want to save money` (EN) and `quiero ahorrar` (ES) — fail on raw data, succeed on enriched.
+Specifically the demo measures three signals per agent run, side-by-side in the UI:
+
+- **wall time** — agent run latency
+- **tool calls** — how many round trips the agent made
+- **tokens** — total LLM context burned
+
+On the demo's hero queries, the AI-ready agent is 2–5× faster and burns ~3–6× fewer tokens. The vibe-coded agent's overhead is real: it has to discover the schema, learn MEASURE() syntax, resolve service ids, and iterate when its SQL is wrong.
 
 ---
 
-## What Was Built
+## Architecture overview
 
-### 1. Sample data (`data/`)
+### Runtime
 
-Generated from `setup/generate_data.py` (hand-authored enrichments, not LLM-generated at runtime):
+Databricks Apps container running **Python 3.11** under `uvicorn`. Single FastAPI app at `agents_service.main:app`.
 
-| File | Contents |
-|------|----------|
-| `services_raw.jsonl` | 20 Yape services — thin catalog copy |
-| `services_enriched.jsonl` | Same 20 rows + `semantic_description`, `intent_tags`, `user_intent_phrases`, `embedding_text` |
-| `users.jsonl` | 6 Peruvian user personas |
-| `search_eval.jsonl` | 15 labeled queries (EN + ES hard queries) |
-
-### 2. Python setup scripts (`setup/`)
-
-| Script | Purpose |
-|--------|---------|
-| `0_validate_previews.py` | Checklist for Unity AI Gateway, Supervisor API, UC trace storage previews |
-| `1_create_uc_tables.py` | Create/load Delta tables in `ac_demo.agents` |
-| `2_create_vector_indexes.py` | Create VS endpoint + two Delta Sync indexes (qwen3 embeddings) |
-| `3_register_uc_functions.py` | Register `search_yape_services()` UC function for Tier 3 |
-| `_config.py` | Shared constants (catalog, schema, index names, models) |
-| `generate_data.py` | Regenerate seed JSONL from Python source |
-| `requirements.txt` | `databricks-sdk>=0.40.0` |
-
-**UC objects created:**
-
-| Object | Full name |
-|--------|-----------|
-| Raw table | `ac_demo.agents.yape_services_raw` |
-| Enriched table | `ac_demo.agents.yape_services_enriched` |
-| Users table | `ac_demo.agents.yape_users` |
-| Eval table | `ac_demo.agents.yape_search_eval` |
-| VS endpoint | `yape-search-demo-endpoint` (STORAGE_OPTIMIZED) |
-| VS index (raw) | `ac_demo.agents.yape_services_raw_idx` — embeds `search_text` |
-| VS index (enriched) | `ac_demo.agents.yape_services_enriched_idx` — embeds `embedding_text` |
-| UC function | `ac_demo.agents.search_yape_services(query STRING)` |
-
-**Models:**
-
-- LLM: `databricks-claude-opus-4-6` (Supervisor API / Unity AI Gateway)
-- Embeddings: `databricks-qwen3-embedding-0-6b` (Vector Search managed)
-
-### 3. AppKit app (Node.js + React)
-
-Scaffolded with:
-
-```bash
-databricks apps init --name yape-search-demo --output-dir yape_demo \
-  --features analytics --set analytics.sql-warehouse.id=01370556fad60fda --run none
+```
+uvicorn  ──>  FastAPI
+              ├─ POST /api/agents/stream    (SSE)
+              ├─ GET  /api/services/raw     (JSON)
+              ├─ GET  /api/services/enriched (JSON)
+              ├─ GET  /api/benchmark        (JSON)
+              ├─ GET  /api/health
+              └─ /     (StaticFiles → client/dist/)
 ```
 
-Later renamed to **`dais-demo-ai-data-search`** for deployment.
+Per request, FastAPI spawns **two `claude-agent-sdk.query()` sessions in parallel** (one per agent) via `asyncio`. Messages from both sessions are interleaved by arrival time onto a single SSE stream, tagged with `agent: 'vibe' | 'ready'`. The client splits them into two columns in real time.
 
-**Backend:**
+### LLM path
 
-- `server/server.ts` — plugins: `analytics()`, `searchPlugin()`, `server()`
-- `server/plugins/search.ts` — custom AppKit plugin with `POST /api/search/query`. All calls run on-behalf-of-user via `this.asUser(req)` + `getExecutionContext().client`.
-  - **Tier 0:** SQL `LIKE` on `yape_services_raw.search_text` (SQL warehouse)
-  - **Tier 1:** `client.vectorSearchIndexes.queryIndex` on raw index
-  - **Tier 2:** `client.vectorSearchIndexes.queryIndex` on enriched index
-  - **Tier 3:** `client.apiClient.request` to `/ai-gateway/mlflow/v1/responses` with `uc_function` tool
-- `shared/search-types.ts` — shared TypeScript types for client + server
+Both agents target the **Databricks AI Gateway**:
 
-**No static tokens.** The earlier implementation used `process.env.DATABRICKS_TOKEN` for the VS REST and Supervisor calls — that fails in Databricks Apps, which only expose service-principal OAuth (`DATABRICKS_CLIENT_ID`/`SECRET`) and the user OBO token in `x-forwarded-access-token`. The plugin now goes through the WorkspaceClient so auth headers are added by the SDK in whichever context (user or SP) is active.
+```
+ANTHROPIC_BASE_URL  = https://<workspace>/ai-gateway/anthropic
+ANTHROPIC_AUTH_TOKEN = <SP bearer from WorkspaceClient.config.authenticate()>
+ANTHROPIC_MODEL      = databricks-claude-opus-4-6  (or sonnet-4-6 / haiku-4-5)
+ANTHROPIC_CUSTOM_HEADERS = x-databricks-use-coding-agent-mode: true
+```
 
-**SQL queries (`config/queries/`):**
+The bundled `claude` CLI inside `claude-agent-sdk` handles the actual API calls. The SDK ships its CLI as a Python package resource — no external binary, no `npm install`, no Docker work for Databricks Apps.
 
-- `services_raw.sql`, `services_enriched.sql`, `eval_queries.sql` — catalog/eval reads
-- `keyword_search.sql` — parameterized keyword search (optional)
-- `benchmark_summary.sql` — placeholder tier metrics for Benchmark page
+### Tools / MCP
 
-**Frontend (`client/src/`):**
+Each agent gets a **separate in-process MCP server** named `yape`:
+
+| Agent | MCP-registered tools |
+|---|---|
+| `VIBE_TOOLS` | `execute_sql` |
+| `READY_TOOLS` | `execute_sql`, `search_yape_services_enriched`, `list_services_by_category`, `top_services_by_region`, `compare_regions_adoption`, `avg_ticket_by_cohort`, `services_for_segment`, `query_metric_view` |
+
+The MCP tools are Python functions decorated with `@tool(name, description, schema)`. The descriptions are deliberately rich — they're how the LLM picks which tool to call. The system prompt then adds a numbered decision tree to bias selection further.
+
+---
+
+## Data layer (Unity Catalog)
+
+All in `ac_demo.agents` on `e2-demo-field-eng`.
+
+### Tables
+
+| Object | Rows | Provisioned by |
+|---|---|---|
+| `yape_services_raw` | 20 | `setup/1_create_uc_tables.py` ← `data/services_raw.jsonl` |
+| `yape_services_enriched` | 20 | same; adds `intent_tags`, `user_intent_phrases`, `embedding_text` |
+| `yape_users` | 6 | persona table for the demo narrative |
+| `yape_search_eval` | 15 | labeled queries (EN/ES) |
+| `yape_transactions` | 8000 | `setup/generate_transactions.py` then `1_create_uc_tables.py` |
+
+Transactions are persona-biased: Lima skews savings + business, Arequipa skews utilities, 18–24 skews top-ups + streaming, 35+ skews utilities + insurance. Amount distributions are tier-banded so analytical queries return realistic patterns.
+
+### Metric views (YAML v1.1, snake_case)
+
+All three live in `ac_demo.agents`:
+
+| View | Dimensions | Measures |
+|---|---|---|
+| `yape_service_adoption` | service_id, region, age_cohort, month, channel | distinct_users, total_transactions, total_volume_pen |
+| `yape_avg_ticket` | service_id, age_cohort, region | avg_ticket_pen, median_ticket_pen, transaction_count |
+| `yape_segment_behavior` | service_id, usage_tier, value_tier, region, age_cohort, channel | distinct_users, total_transactions, total_volume_pen, avg_ticket_pen |
+
+`yape_segment_behavior` joins a supporting **`yape_user_segments`** plain SQL view that classifies users:
+
+- `usage_tier` ∈ {heavy (top 20% by txn count), medium (next 30%), light (rest)}
+- `value_tier` ∈ {high_value (top 20% by total volume), mid_value, low_value}
+
+All dim / measure names are snake_case so LLM-generated SQL doesn't need backtick-quoting.
+
+### UC functions (agent-facing)
+
+Each is a `RETURNS TABLE` function with a descriptive `COMMENT` the LLM reads when picking tools.
+
+| Function | Signature | Wraps |
+|---|---|---|
+| `search_yape_services(query)` | raw VS index | `yape_services_raw_idx` (kept for the Vibe-Coded reference path; not currently MCP-exposed) |
+| `search_yape_services_enriched(query)` | enriched VS index | `yape_services_enriched_idx` |
+| `top_services_by_region(region_filter, months_back)` | adoption metric | `yape_service_adoption` |
+| `compare_regions_adoption(region_a, region_b, months_back)` | one-call comparison | `yape_service_adoption` ×2 |
+| `avg_ticket_by_cohort(service_id_filter)` | ticket-size metric | `yape_avg_ticket` |
+| `services_for_segment(usage_tier_filter, value_tier_filter)` | segment behavior | `yape_segment_behavior` |
+| `list_services_by_category(category_filter)` | catalog lookup | `yape_services_enriched` |
+
+All parameters are suffixed `_filter` to avoid collisions with column names (SQL UC functions silently prefer columns over parameters when names overlap — see [gotcha #9](#9-uc-function-parameter--column-collision)).
+
+### Vector Search
+
+Endpoint `yape-search-demo-endpoint`, `STORAGE_OPTIMIZED`, two indexes:
+
+- `yape_services_raw_idx` — embeds `search_text` (`name + category + description` concatenated)
+- `yape_services_enriched_idx` — embeds `embedding_text` (catalog + intent tags + bilingual phrases)
+
+Embedding model: `databricks-qwen3-embedding-0-6b` (managed). Pipeline: `TRIGGERED` (manual `sync_index` after `INSERT OVERWRITE`).
+
+---
+
+## Python backend (`python/agents_service/`)
+
+| File | What it does |
+|---|---|
+| `auth.py` | Reads the app's SP credentials via the Databricks SDK, exchanges them for a workspace OAuth bearer, returns the env dict that `claude-agent-sdk` needs (base URL, auth token, model, custom header, model defaults). |
+| `tools.py` | All MCP tool definitions. Two `create_sdk_mcp_server()` calls produce `VIBE_TOOLS` and `READY_TOOLS`. The whitelist `METRIC_VIEW_CATALOG` is the source of truth for `query_metric_view`'s allowed dim/measure names. |
+| `runner.py` | `stream_both(query, model)` → `AsyncIterator[event]`. Spawns two `_run_one` tasks, one per agent, and merges events through a shared `asyncio.Queue`. Each task forwards `AssistantMessage` / `UserMessage` / `ResultMessage` into typed SSE events. |
+| `main.py` | FastAPI app — routes + SSE wrapper via `sse_starlette.EventSourceResponse`. Mounts `client/dist/` as static. |
+
+### Event types emitted to the client
+
+```
+session_start   { agent, ts }
+text_delta      { agent, text }
+tool_call       { agent, call_id, tool, args }
+tool_result     { agent, call_id, output, is_error }
+done            { agent, tokens, cost_usd, latency_ms, num_tool_calls }
+error           { agent, message, latency_ms? }
+```
+
+The client (`client/src/lib/search-api.ts`) reduces these into a per-agent `AgentRunState` using a small switch over the discriminated union.
+
+### Agent options
+
+```python
+ClaudeAgentOptions(
+    model=model,                            # databricks-claude-{opus,sonnet,haiku}-...
+    tools=[],                               # strip Bash/Read/Edit/Write
+    mcp_servers={"yape": VIBE_TOOLS | READY_TOOLS},
+    allowed_tools=[...],                    # belt-and-suspenders allowlist
+    permission_mode="bypassPermissions",
+    system_prompt=VIBE_SYSTEM | READY_SYSTEM,
+    env=gateway_env(model),                 # AI Gateway URL + bearer
+    setting_sources=[],                     # don't read ~/.claude/settings.json
+)
+```
+
+---
+
+## Frontend (`client/src/`)
 
 | Page | Route | Purpose |
-|------|-------|---------|
-| Search | `/` | Multi-tier comparison with side-by-side results |
-| Data Compare | `/compare` | Raw vs enriched side-by-side |
-| Benchmark | `/benchmark` | Hit@4 / MRR cards |
+|---|---|---|
+| `AgentsPage` | `/` | Two-agent split-screen with live tool-call streaming, model dropdown, hero query buttons, comparison sidebar. |
+| `DataComparePage` | `/compare` | Raw vs enriched catalog side-by-side. Reads `/api/services/{raw,enriched}`. |
+| `BenchmarkPage` | `/benchmark` | Static hit@4 / tool-call / latency benchmarks per agent. Reads `/api/benchmark`. |
 
-`SearchPage` mirrors the MAS demo layout:
+Header is Databricks Navy `#1B3139`; active nav uses Lava red `#FF3621`. Light mode is **forced** via `<html class="light" style="color-scheme: light">` in `client/index.html` so the appkit-ui dark-mode media query (`:root:not(.light)`) doesn't fire — see [gotcha #5](#5-app-theme-locked-to-dark-mode).
 
-- Navy header (`#1B3139`) with white Yape wordmark and Lava-red (`#FF3621`) active nav
-- Header-right **Tiers picker** (`TierPicker.tsx`) — `DropdownMenu` with checkbox items, `All`/`None` quick links
-- Main panel: hero-query buttons → multi-line `Textarea` + circular red send button
-- N side-by-side `TierResultColumn` cards (one per selected tier) render on Send
-- Right sidebar (`RunDetailsSidebar.tsx`, ~320px) shows per-tier latency, top hit, score, and MLflow trace link (T3)
-- ⌘/Ctrl+Enter sends; default selection is T0+T2 (the before/after pair)
+The SSE parser at `streamAgents()` normalizes CRLF → LF before splitting frames on `\n\n` — see [gotcha #6](#6-sse-frame-separator).
 
-Theme is locked to light mode via `<html class="light" style="color-scheme: light">` so the appkit-ui dark-mode media query (`:root:not(.light)`) doesn't fire.
+---
 
-**Eval:**
-
-- `eval/run_benchmark.py` — batch Hit@4/MRR for tiers 0–2 (Tier 3 excluded; run manually in UI)
-
-### 4. DABs bundle (`databricks.yml`)
+## DABs bundle (`databricks.yml`)
 
 ```yaml
-bundle:
-  name: dais-demo-ai-data-search
-
-variables:
-  catalog, schema, sql_warehouse_id, budget_policy_id
-
 resources:
   apps:
     app:
       name: dais-demo-ai-data-search
+      source_code_path: ./
       user_api_scopes:
-        - sql                                   # warehouse keyword search
-        - serving.serving-endpoints             # supervisor + opus invocation
-        - vectorsearch.vector-search-indexes    # queryIndex via SDK
-        - ai-gateway                            # /ai-gateway/mlflow/v1/responses (Tier 3)
+        - sql
+        - serving.serving-endpoints
+        - vectorsearch.vector-search-indexes
+        - ai-gateway
+        - mcp.functions
+
       resources:
         - sql-warehouse (CAN_USE)
         - services-raw-table (SELECT)
         - services-enriched-table (SELECT)
         - search-eval-table (SELECT)
-        - search-function (EXECUTE)
+        - transactions-table (SELECT)
+        - fn-search-raw (EXECUTE)
+        - fn-search-enriched (EXECUTE)
+        - fn-top-services-by-region (EXECUTE)
+        - fn-avg-ticket-by-cohort (EXECUTE)
+        - fn-list-services-by-category (EXECUTE)
+        - fn-services-for-segment (EXECUTE)
         - opus-endpoint → databricks-claude-opus-4-6 (CAN_QUERY)
-
-targets:
-  dev:   # default, mode: development
-  prod:  # mode: production
 ```
 
-Both targets point at `e2-demo-field-eng` with warehouse `01370556fad60fda` (TPCDS_L).
+Both targets (`dev`, `prod`) point at `e2-demo-field-eng` with warehouse `01370556fad60fda` (TPCDS_L).
 
 ---
 
-## Four Search Tiers
-
-| Tier | Label | Implementation | Expected on hero queries |
-|------|-------|----------------|--------------------------|
-| 0 | Keyword (vibe-coded) | SQL substring on `search_text` | Fail |
-| 1 | VS on raw data | Vector Search on `yape_services_raw_idx` | Fail |
-| 2 | VS on AI-ready data | Vector Search on `yape_services_enriched_idx` | **Succeed (~90% Hit@4)** |
-| 3 | Supervisor + Opus 4.6 | Unity AI Gateway + `search_yape_services` UC function on raw index | Fail (proves data is the bottleneck) |
-
----
-
-## Deployment Steps Performed
-
-### One-time data setup
+## Deployment
 
 ```bash
-pip install -r setup/requirements.txt
-export DATABRICKS_WAREHOUSE_ID=01370556fad60fda
+# Data + governance (idempotent — safe to rerun)
+python setup/1_create_uc_tables.py         # tables incl. 8k transactions
+python setup/2_create_vector_indexes.py    # 5–15 min
+python setup/3_register_uc_functions.py    # 6 UC functions
+python setup/4_create_metric_views.py      # 3 metric views + user_segments
 
-python setup/1_create_uc_tables.py      # succeeded
-python setup/3_register_uc_functions.py   # succeeded after fixes (see below)
-python setup/2_create_vector_indexes.py  # requires 5–15 min; see gotchas
-```
-
-### Build
-
-```bash
-npm install
-npm run build
-```
-
-**Build change:** Removed `typegen` from `postinstall` and `prebuild` so fresh clones build without live UC tables. Committed `client/src/appKitTypes.d.ts` instead. Run `npm run typegen` manually after tables exist (also runs on `npm run dev`).
-
-### DABs deploy
-
-```bash
-databricks bundle validate --target dev
-
-# App already existed — bind before first deploy:
-databricks bundle deployment bind app dais-demo-ai-data-search --target dev --auto-approve
-
+# Build + deploy
+npm run build:client                       # writes client/dist
 databricks bundle deploy --target dev --auto-approve
-databricks apps deploy --target dev
+databricks apps deploy dais-demo-ai-data-search \
+  --source-code-path /Workspace/Users/<user>/.bundle/dais-demo-ai-data-search/dev/files
 ```
 
-**Result:** App state `RUNNING`, deployment `SUCCEEDED`.
+The Apps runtime detects Python via `requirements.txt`, runs `npm run build:server && npm run build:client` (legacy package.json scripts — harmless; only the client build matters), then runs the `command:` from `app.yaml` (`uvicorn agents_service.main:app …`).
 
 ---
 
-## GitHub
+## Gotchas + lessons learned
 
-Pushed to **auschoi96** as a new public repo:
+### 1. Databricks Apps have no static PAT
 
-- **URL:** https://github.com/auschoi96/dais-demo-ai-data-search
-- **Branch:** `main`
-- **Commit:** Initial commit with full app, setup scripts, data, README
+**Symptom:** Earlier Node implementation used `process.env.DATABRICKS_TOKEN` and got `DATABRICKS_TOKEN is not configured` in production.
 
-`.gitignore` excludes: `node_modules/`, `dist/`, `client/dist/`, `.env`, `.databricks/`, `__pycache__/`.
+**Reality:** Databricks Apps expose service-principal OAuth (`DATABRICKS_CLIENT_ID` / `_SECRET`) and the user's OBO token in the `x-forwarded-access-token` header. No PAT.
 
----
+**Fix:** Use `WorkspaceClient` from the Databricks SDK and let it pick up the SP credentials automatically. For the AI Gateway path specifically: `WorkspaceClient().config.authenticate()` returns the Bearer headers; pull the token out and pass it as `ANTHROPIC_AUTH_TOKEN`.
 
-## Issues Encountered and Fixes
+### 2. The `unity-catalog` scope is a misleading error
 
-### 1. Vector index: pending deletion race
+**Symptom:** Calling Supervisor API / AI Gateway with a `uc_function` tool: `Insufficient OAuth scopes for requested tools: 'uc_function' (requires 'unity-catalog')`. But adding `unity-catalog` to `user_api_scopes` is rejected by the DABs Terraform provider: *"is not a valid scope."*
 
-**Error:** `Index ... is currently pending deletion`
+**Reality:** The receiving gateway's error message references a legacy scope name. The actual scope the Apps OAuth issuer mints (and the gateway accepts) is **`mcp.functions`**. The Apps UI scope picker also doesn't surface `mcp.functions` — it has to be added via DABs / API. Tracked in JIRA ES-1855028 and ML-63358; fix landed in app-templates PR #215 around May 2026.
 
-**Fix:** Added `wait_until_index_deleted()` in `2_create_vector_indexes.py` after `delete_index()`. Also skip drop/recreate if index is already `ready` (sync only).
+**Fix:** `user_api_scopes: [..., mcp.functions]`. Users with an existing browser session must sign out + back in (or open incognito) so the new scope makes it into their OBO token.
 
-### 2. Vector index: wrong SDK enum for endpoint type
+### 3. Apps UI scope picker hides many valid scopes
 
-**Error:** `'str' object has no attribute 'value'` on `endpoint_type="STORAGE_OPTIMIZED"`
+The picker is a curated list — `sql`, `dashboards.genie`, `files.files`, the `catalog.*` family. Less-common scopes like `ai-gateway`, `mcp.functions`, `vectorsearch.vector-search-indexes`, `serving.serving-endpoints` aren't shown there, but they're valid and can be added via DABs / REST API. The workspace's "Restrict OAuth scopes for apps to selected values" setting can further narrow what's accepted.
 
-**Fix:** Use `EndpointType.STORAGE_OPTIMIZED` from `databricks.sdk.service.vectorsearch`.
+Truth source for "what does this app actually have":
 
-### 3. Vector index: wrong wait API
-
-**Error:** `'VectorIndexStatus' object has no attribute 'detailed_state'`
-
-**Fix:** Poll `idx.status.ready` instead.
-
-### 4. Vector index: multiple embedding columns rejected
-
-**Error:** `At least one valid embedding_source_column ... must be specified` with 3 columns (name, category, description)
-
-**Fix:** Use single `search_text` column on raw table for the raw index (concat of name + category + description, populated in `1_create_uc_tables.py`).
-
-### 5. UC function: CASE in index parameter
-
-**Error:** `vector_search` requires foldable index expression when using `CASE WHEN index_variant ...`
-
-**Fix:** Simplified to single-argument function `search_yape_services(query STRING)` targeting raw index only. Tier 3 demo uses raw index by design.
-
-### 6. UC function: wrong score column name
-
-**Error:** `score` cannot be resolved; actual column is `search_score`
-
-**Fix:** `SELECT ... search_score AS score FROM vector_search(...)`.
-
-### 7. Users table schema mismatch
-
-**Error:** `KeyError: 'income'` when loading `users.jsonl`
-
-**Fix:** Updated table schema to match JSONL fields (`monthly_income`, `tx_count_30d`, `avatar`, `age`, `yape_since`).
-
-### 8. DABs: app already exists
-
-**Error:** `An app with the same name already exists`
-
-**Fix:** `databricks bundle deployment bind app dais-demo-ai-data-search --target dev --auto-approve` before deploy.
-
-### 9. DABs: Terraform provider budget_policy_id glitch
-
-**Error:** `Provider produced inconsistent result after apply ... budget_policy_id: was null, but now ...`
-
-**Fix:** Set `budget_policy_id` in `databricks.yml` (per-target variable). Required for updating the pre-existing app on `e2-demo-field-eng`; optional for new apps on other workspaces.
-
-### 10. DABs: UC function missing at deploy time
-
-**Error:** `Routine or Model 'ac_demo.agents.search_yape_services' does not exist`
-
-**Fix:** Run `setup/3_register_uc_functions.py` before `bundle deploy` (bundle declares EXECUTE permission on that function).
-
-### 11. Typegen fails without UC tables
-
-**Error:** `TABLE_OR_VIEW_NOT_FOUND` during `npm run typegen`
-
-**Fix:** Commit generated `appKitTypes.d.ts`; decouple typegen from `postinstall`/`prebuild`. Tables must exist before regenerating types.
-
-### 12. AppKit `--features serving` not available
-
-The AppKit v0.23.0 template only supports: `analytics`, `files`, `genie`, `lakebase`, `server`. Search routes were implemented as a **custom plugin** instead of tRPC/serving plugin.
-
-### 13. Search plugin used `process.env.DATABRICKS_TOKEN` (apps have no PAT)
-
-**Symptom:** All non-Tier-0 calls returned 502 in production. App logs showed `DATABRICKS_TOKEN is not configured`.
-
-**Root cause:** Databricks Apps only expose service-principal OAuth env vars (`DATABRICKS_CLIENT_ID`/`SECRET`) plus the user OBO token in the `x-forwarded-access-token` header. There is no static PAT.
-
-**Fix:** Replaced raw `fetch(..., Authorization: Bearer ${env.TOKEN})` with `getExecutionContext().client` — `vectorSearchIndexes.queryIndex` for Tiers 1/2 and `apiClient.request` for Tier 3. Wrapped the route handler with `this.asUser(req)` so calls go OBO. Added the matching `user_api_scopes`.
-
-### 14. Tier 3 needs `ai-gateway` scope (and a fresh session)
-
-After adding `serving.serving-endpoints`, T3 still returned 502 with `Provided OAuth token does not have required scopes: ai-gateway`. The `/ai-gateway/mlflow/v1/responses` endpoint is its own scope.
-
-**Fix:** Add `ai-gateway` to `user_api_scopes`. **Note:** existing browser sessions cache the OBO token — after editing scopes, sign out + back in (or use a fresh incognito window) so the token is reminted with the new scopes.
-
-### 15. App theme locked to dark mode
-
-`@databricks/appkit-ui/styles.css` has a `@media (prefers-color-scheme: dark) :root:not(.light) { ... }` block that flipped the whole app dark on systems set to dark mode.
-
-**Fix:** `<html class="light" style="color-scheme: light">` in `client/index.html` so the dark-mode rule doesn't match.
-
----
-
-## Directory Layout (final)
-
-```
-dais-demo-ai-data-search/
-├── client/src/           # React UI (Search, Benchmark, Compare, Home)
-├── server/               # AppKit server + search plugin
-├── shared/               # Shared TypeScript types
-├── config/queries/       # Typed SQL for analytics plugin
-├── data/                 # Seed JSONL
-├── setup/                # Python UC/VS provisioning
-├── eval/                 # Benchmark harness
-├── reference/            # yape_recsys.py (Streamlit baseline, not deployed)
-├── databricks.yml        # DABs bundle
-├── app.yaml              # App runtime (npm start, warehouse env)
-├── README.md             # User-facing deploy guide
-└── IMPLEMENTATION_NOTES.md  # This file
+```bash
+databricks apps get dais-demo-ai-data-search | jq '.effective_user_api_scopes'
 ```
 
+### 4. `allowed_tools` is not enough for tool isolation
+
+**Symptom:** Even with `allowed_tools=[TOOL_EXECUTE_SQL]`, the Vibe agent could see and call `search_yape_services_enriched`, `avg_ticket_by_cohort`, etc.
+
+**Reality:** `claude-agent-sdk`'s `allowed_tools` is a **permission** layer. Combined with `permission_mode="bypassPermissions"` (which auto-approves all tool calls), the allowlist is effectively bypassed. The MCP tools registered on a *shared* server are still visible to the agent's context and still callable.
+
+**Fix:** Register a **separate MCP server per agent**. Vibe's server only includes `execute_sql`; the governed tools simply don't exist in its tool list. `allowed_tools` stays as belt-and-suspenders.
+
+```python
+# tools.py
+VIBE_TOOLS  = create_sdk_mcp_server(name="yape", version="1.0.0",
+                                    tools=[execute_sql])
+READY_TOOLS = create_sdk_mcp_server(name="yape", version="1.0.0",
+                                    tools=[execute_sql, search_enriched,
+                                           top_services_by_region, ...])
+```
+
+### 5. App theme locked to dark mode
+
+**Symptom:** Audience laptops in dark mode → entire app rendered dark, ruining the Databricks-brand light theme.
+
+**Cause:** `@databricks/appkit-ui/styles.css` has a `@media (prefers-color-scheme: dark) :root:not(.light) { ... }` block that flips all CSS variables.
+
+**Fix:** `<html class="light" style="color-scheme: light">` in `client/index.html`. The `:not(.light)` selector now fails, the dark-mode block doesn't apply.
+
+### 6. SSE frame separator
+
+**Symptom:** Tool-call events were streamed by the backend (confirmed via curl) but the React UI showed both agents stuck on "Thinking…".
+
+**Cause:** `sse_starlette` emits frames separated by `\r\n\r\n`. The frontend's manual SSE parser only split on `\n\n`. `'\r\n\r\n'` doesn't contain `'\n\n'` (the \n chars aren't adjacent — \r sits between them), so frames never flushed.
+
+**Fix:** Normalize `\r\n` → `\n` on each chunk before splitting:
+
+```ts
+buf += decoder.decode(value, { stream: true }).replace(/\r\n/g, '\n');
+```
+
+### 7. Named tools beat the generic introspector empirically
+
+After building `query_metric_view(view_name, dimensions[], measures[], filters{})` as a single tool to cover all three metric views, we tested dropping the four named wrappers (`top_services_by_region`, `compare_regions_adoption`, `avg_ticket_by_cohort`, `services_for_segment`). Result: AI-Ready agent regressed on every demo query — calling `query_metric_view` 3–4 times before falling back to `execute_sql`. On some queries, Vibe (raw SQL) was burning *fewer* tokens than Ready.
+
+**Reason:** The generic API exposes 4 degrees of freedom (view, dims, measures, filters). LLMs struggle to construct the multi-field arg blob correctly on the first try — every wrong call adds ~3-4k tokens of context to retry.
+
+**Fix:** Keep both. Named tools encode "the right defaults" (months_back=1, LIMIT 5, ORDER BY distinct_users DESC, JOIN to enriched catalog for service names) as a single typed parameter; LLMs use them in 1 call. The generic introspector stays as a fallback for cross-cuts the named tools don't cover.
+
+Snake_case for dim/measure names + fuzzy matching at the tool layer (`_canonicalize`) were also added. Helpful, but didn't close the gap on their own.
+
+### 8. Metric view dim names need snake_case for LLM-generated SQL
+
+**Original:** `Service ID`, `Age Cohort`, `Total Volume PEN` — required backtick-quoting in every query.
+
+**Now:** `service_id`, `age_cohort`, `total_volume_pen` — no quoting needed, matches column-name conventions LLMs and SQL editors expect.
+
+### 9. UC function parameter / column collision
+
+**Symptom:** `SELECT * FROM list_services_by_category('Insurance')` returned all 20 services, not just the 2 Insurance ones.
+
+**Cause:** The function had a parameter named `category` and the source view also has a `category` column. In Databricks UC SQL functions, when a parameter name collides with a column name, the column wins. The `WHERE category = category` clause became "column = column" — trivially true.
+
+**Fix:** Rename parameters to non-colliding names (e.g. `category_filter`, `region_filter`, `service_id_filter`).
+
+### 10. claude-agent-sdk's bundled CLI
+
+The SDK ships its own `claude` CLI as a package resource — no separate npm install, no static binary download, no Dockerfile work. On Databricks Apps, `pip install claude-agent-sdk` is the entire install. Setting `cli_path=None` (the default) lets the SDK use the bundled CLI; setting `setting_sources=[]` ensures it doesn't try to read `~/.claude/settings.json` which doesn't exist in the container.
+
+### 11. Apps' dual Node + Python build
+
+The Databricks Apps build phase auto-detects both `requirements.txt` and `package.json` and runs `npm install && npm run build` regardless of the `command:` in `app.yaml`. For us, the Node build produces an unused `dist/` output (the old AppKit server lives in `server/` — leftover dead code) plus the `client/dist/` Vite bundle that *is* used.
+
+Net effect: every deploy spends ~20s on a build that produces some artifacts we throw away. Removing `server/`, `package.json`'s `build:server` script, and tightening `package.json` to client-only would clean this up — follow-up cleanup task.
+
+### 12. Cancel-scope warning on agent teardown
+
+When the SSE stream closes mid-run (user disconnects, frontend aborts), `claude-agent-sdk`'s underlying anyio generator may raise `RuntimeError: Attempted to exit cancel scope in a different task than it was entered in`. The error is cosmetic — the events already produced are intact, the `done` event has already been forwarded. Future work: a clean shutdown path.
+
 ---
 
-## Redeploy Checklist
+## Open items / cleanup
 
-1. `python setup/1_create_uc_tables.py` (if data changed)
-2. `python setup/2_create_vector_indexes.py` + wait for indexes ready
-3. `python setup/3_register_uc_functions.py`
-4. `npm run build`
-5. `databricks bundle deploy --target dev --auto-approve`
-6. `databricks apps deploy --target dev`
-7. Verify: https://dais-demo-ai-data-search-1444828305810485.aws.databricksapps.com
+| Item | Why it's open |
+|---|---|
+| Delete `server/` (old Node/AppKit code) | Dead since the Python rewrite. Build still runs against it for no reason. |
+| Trim `package.json` to client-only scripts | Same — Node-server `build:server` script is unused. |
+| Suppress / clean up the cancel-scope warning | Cosmetic but noisy in logs. |
+| Refresh `eval/run_benchmark.py` against the new two-agent endpoint | Old benchmark harness assumed the tier-search backend; numbers in `/api/benchmark` are hand-loaded for now. |
+| Add a `reference/` walkthrough cleanup | `yape_recsys.py` is still around as the "what people actually ship" before-slide. Move or label clearly. |
 
 ---
 
-## Presenter Flow (summary)
+## Models
 
-1. **Vibe-coded baseline** — show `reference/yape_recsys.py` (Streamlit, hardcoded dicts)
-2. **Platform, raw data** — Tier 0 → Tier 1, hero query fails
-3. **AI-ready data** — Data Compare page, then Tier 2, hero queries succeed
-4. **Supervisor contrast** — Tier 3 runs agent loop but hard intents still miss
-5. **Benchmark close** — Hit@4 jump on Tier 2; narrative: Semantic · Governed · Vectorized · Measured
+| Role | Endpoint |
+|---|---|
+| Agent (default) | `databricks-claude-opus-4-6` |
+| Agent (Sonnet option in dropdown) | `databricks-claude-sonnet-4-6` |
+| Agent (Haiku option in dropdown) | `databricks-claude-haiku-4-5` |
+| VS embedding model | `databricks-qwen3-embedding-0-6b` |
+
+Earlier iterations targeted `claude-opus-4-7`; the Supervisor API rejected it as unsupported when we briefly used `/ai-gateway/mlflow/v1/responses`. The current `/ai-gateway/anthropic` path serves Opus 4.6 cleanly.
 
 ---
 
 ## Environment
 
 | Setting | Value |
-|---------|-------|
+|---|---|
 | Workspace | `e2-demo-field-eng` |
-| CLI profile | Default (`e2-demo-field-eng`) |
 | SQL warehouse | `01370556fad60fda` (TPCDS_L) |
 | UC location | `ac_demo.agents` |
 | App name | `dais-demo-ai-data-search` |
-| Budget policy (e2-demo only) | `5b62fa02-8671-46d3-96ac-64c1725dc9d9` |
-
----
-
-## Out of Scope (v1)
-
-- Recommendation system / CF scores from `yape_recsys.py`
-- Tier 3 batch eval in `run_benchmark.py`
-- Automated enrichment via `ai_query()` at runtime (pre-built JSONL shipped instead)
-- Flattening nested `yape_demo/yape-search-demo/` path (repo root is the app)
+| App runtime | Python 3.11, `uvicorn`, Databricks Apps MEDIUM |
+| Budget policy (workspace-required) | `5b62fa02-8671-46d3-96ac-64c1725dc9d9` |
