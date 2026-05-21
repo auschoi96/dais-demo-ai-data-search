@@ -33,17 +33,6 @@ declare module "@databricks/appkit-ui/react" {
           tier: string;
         }>;
       };
-    hello_world: {
-        name: "hello_world";
-        parameters: {
-          /** any - use sql.*() */
-          message: SQLTypeMarker;
-        };
-        result: Array<{
-          /** @sqlType STRING */
-          value: string;
-        }>;
-      };
     keyword_search: {
         name: "keyword_search";
         parameters: {
@@ -63,25 +52,6 @@ declare module "@databricks/appkit-ui/react" {
           description: string;
           /** Concatenated name + category + description for keyword search */
           searchable_text: string;
-        }>;
-      };
-    mocked_sales: {
-        name: "mocked_sales";
-        parameters: {
-          /** any - use sql.*() */
-          max_month_num: SQLTypeMarker;
-        };
-        result: Array<{
-          /** @sqlType STRING */
-          month: string;
-          /** @sqlType INT */
-          month_num: number;
-          /** @sqlType INT */
-          revenue: number;
-          /** @sqlType INT */
-          expenses: number;
-          /** @sqlType INT */
-          customers: number;
         }>;
       };
     services_enriched: {

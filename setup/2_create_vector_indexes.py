@@ -117,7 +117,13 @@ def create_or_replace_index(
     )
     wait_for_index(w, index_name)
     print(f"Syncing index: {index_name}")
-    w.vector_search_indexes.sync_index(index_name)
+    try:
+        w.vector_search_indexes.sync_index(index_name)
+    except Exception as exc:  # noqa: BLE001
+        if "sync job" in str(exc).lower() and "running" in str(exc).lower():
+            print(f"  sync already in progress for {index_name.split('.')[-1]}, skipping")
+        else:
+            raise
 
 
 def main() -> None:

@@ -27,7 +27,7 @@ export function BenchmarkPage() {
   const rows = (data ?? []) as BenchmarkRow[];
 
   return (
-    <div className="max-w-6xl mx-auto space-y-6">
+    <div className="max-w-6xl mx-auto p-6 space-y-6">
       <div>
         <h2 className="text-2xl font-bold">Search Benchmark</h2>
         <p className="text-muted-foreground mt-1">

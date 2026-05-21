@@ -14,10 +14,7 @@ import {
 } from './search-config.js';
 
 const DEFAULT_LIMIT = 4;
-
-function gatewayBaseUrl(host: string): string {
-  return `${host.replace(/\/$/, '')}/ai-gateway/mlflow/v1`;
-}
+const RESULT_COLUMNS = ['service_id', 'name', 'category', 'description', 'icon'];
 
 function escapeSql(value: string): string {
   return value.replace(/\\/g, '\\\\').replace(/'/g, "''");
@@ -112,22 +109,6 @@ class SearchPlugin extends Plugin {
     return id;
   }
 
-  private host(): string {
-    const host = process.env.DATABRICKS_HOST;
-    if (!host) {
-      throw new Error('DATABRICKS_HOST is not configured');
-    }
-    return host.replace(/\/$/, '');
-  }
-
-  private token(): string {
-    const token = process.env.DATABRICKS_TOKEN;
-    if (!token) {
-      throw new Error('DATABRICKS_TOKEN is not configured');
-    }
-    return token;
-  }
-
   private async keywordSearch(query: string, limit: number): Promise<SearchResult[]> {
     const w = getExecutionContext().client;
     const sql = `
@@ -152,91 +133,85 @@ class SearchPlugin extends Plugin {
     limit: number,
   ): Promise<SearchResult[]> {
     const indexName = variant === 'enriched' ? INDEXES.enriched : INDEXES.raw;
-    const url = `${this.host()}/api/2.0/vector-search/indexes/${encodeURIComponent(indexName)}/query`;
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${this.token()}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        num_results: limit,
-        query_text: query,
-        columns: ['service_id', 'name', 'category', 'description', 'icon'],
-      }),
+    const tier: '1' | '2' = variant === 'enriched' ? '2' : '1';
+    const client = getExecutionContext().client;
+
+    const result = await client.vectorSearchIndexes.queryIndex({
+      index_name: indexName,
+      query_text: query,
+      columns: RESULT_COLUMNS,
+      num_results: limit,
     });
 
-    if (!response.ok) {
-      const detail = await response.text();
-      throw new Error(`Vector search failed (${response.status}): ${detail}`);
-    }
+    const columnNames = (result.manifest?.columns ?? []).map((c) => c.name ?? '');
+    const rows = result.result?.data_array ?? [];
 
-    const payload = (await response.json()) as {
-      result?: { data_array?: Array<Array<string | number | null>> };
-    };
-    const rows = payload.result?.data_array ?? [];
-    const tier = variant === 'enriched' ? '2' : '1';
+    return rows.map((row) => {
+      const record: Record<string, string> = {};
+      columnNames.forEach((col, idx) => {
+        record[col] = row[idx] ?? '';
+      });
+      const scoreIdx = columnNames.findIndex((c) => c === 'score' || c === '_score' || c === 'search_score');
+      const scoreRaw = scoreIdx >= 0 ? row[scoreIdx] : row[row.length - 1];
+      const score = typeof scoreRaw === 'number' ? scoreRaw : Number(scoreRaw);
 
-    return rows.map((row) => ({
-      service_id: String(row[0] ?? ''),
-      name: String(row[1] ?? ''),
-      category: String(row[2] ?? ''),
-      description: String(row[3] ?? ''),
-      icon: row[4] != null ? String(row[4]) : undefined,
-      score: typeof row[row.length - 1] === 'number' ? (row[row.length - 1] as number) : undefined,
-      tier,
-      latency_ms: 0,
-    }));
+      return {
+        service_id: record.service_id ?? '',
+        name: record.name ?? '',
+        category: record.category ?? '',
+        description: record.description ?? '',
+        icon: record.icon || undefined,
+        score: Number.isFinite(score) ? score : undefined,
+        tier,
+        latency_ms: 0,
+      };
+    });
   }
 
   private async supervisorSearch(
     query: string,
     limit: number,
   ): Promise<{ results: SearchResult[]; trace_url?: string }> {
-    const url = `${gatewayBaseUrl(this.host())}/responses`;
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${this.token()}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        model: LLM_MODEL,
-        input: query,
-        instructions:
-          'You are a Yape fintech assistant. Use the search_yape_services tool to find relevant services for the user intent. Return concise ranked results.',
-        tools: [
-          {
-            type: 'uc_function',
-            uc_function: {
-              name: UC_FUNCTION,
-              description:
-                'Search Yape service catalog by user intent. Returns ranked services from Vector Search.',
-            },
+    const client = getExecutionContext().client;
+    const payload = {
+      model: LLM_MODEL,
+      input: query,
+      instructions:
+        'You are a Yape fintech assistant. Use the search_yape_services tool to find relevant services for the user intent. Return concise ranked results.',
+      tools: [
+        {
+          type: 'uc_function',
+          uc_function: {
+            name: UC_FUNCTION,
+            description:
+              'Search Yape service catalog by user intent. Returns ranked services from Vector Search.',
           },
-        ],
-        tool_choice: 'required',
-        max_output_tokens: 1024,
-        trace_destination: TRACE_DESTINATION,
-        metadata: { demo_tier: '3', index_variant: 'raw' },
-      }),
-    });
+        },
+      ],
+      tool_choice: 'required',
+      max_output_tokens: 1024,
+      trace_destination: TRACE_DESTINATION,
+      metadata: { demo_tier: '3', index_variant: 'raw' },
+    };
 
-    if (!response.ok) {
-      const detail = await response.text();
-      throw new Error(`Supervisor API failed (${response.status}): ${detail}`);
-    }
+    const response = (await client.apiClient.request({
+      path: '/ai-gateway/mlflow/v1/responses',
+      method: 'POST',
+      headers: new Headers({ 'Content-Type': 'application/json' }),
+      raw: false,
+      payload,
+    })) as Record<string, unknown>;
 
-    const payload = (await response.json()) as Record<string, unknown>;
-    const results = this.parseSupervisorResults(payload, limit);
+    const results = this.parseSupervisorResults(response, limit);
     const traceId =
-      typeof payload.trace_id === 'string'
-        ? payload.trace_id
-        : typeof payload.id === 'string'
-          ? payload.id
+      typeof response.trace_id === 'string'
+        ? response.trace_id
+        : typeof response.id === 'string'
+          ? response.id
           : undefined;
+    const host = await client.apiClient.host;
     const trace_url = traceId
-      ? `${this.host()}/ml/experiments/traces?query=trace_id='${traceId}'`
+      ? `${host.origin}/ml/experiments/traces?query=trace_id='${traceId}'`
       : undefined;
 
     return { results, trace_url };

@@ -6,153 +6,209 @@ import {
   CardContent,
   CardHeader,
   CardTitle,
-  Input,
-  Label,
   Skeleton,
+  Textarea,
 } from '@databricks/appkit-ui/react';
-import { HERO_QUERIES, TIER_LABELS, runSearch } from '../../lib/search-api';
-import type { SearchResponse, SearchTier } from '../../../../shared/search-types';
+import { TierPicker } from './TierPicker';
+import { RunDetailsSidebar } from './RunDetailsSidebar';
+import { TierResultColumn } from './TierResultColumn';
+import {
+  HERO_QUERIES,
+  TIER_LABELS,
+  runTiers,
+  type TierRun,
+} from '../../lib/search-api';
+import type { SearchTier } from '../../../../shared/search-types';
 
-const TIERS: SearchTier[] = ['0', '1', '2', '3'];
+const ALL_TIERS: SearchTier[] = ['0', '1', '2', '3'];
+const DEFAULT_TIERS: SearchTier[] = ['0', '2'];
 
 export function SearchPage() {
   const [query, setQuery] = useState('I want to save money');
-  const [tier, setTier] = useState<SearchTier>('0');
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [response, setResponse] = useState<SearchResponse | null>(null);
+  const [selectedTiers, setSelectedTiers] = useState<SearchTier[]>(DEFAULT_TIERS);
+  const [runs, setRuns] = useState<Record<SearchTier, TierRun>>({} as Record<SearchTier, TierRun>);
+  const [running, setRunning] = useState(false);
 
-  async function handleSearch(nextTier = tier) {
-    setLoading(true);
-    setError(null);
-    try {
-      const result = await runSearch({ query, tier: nextTier, limit: 4 });
-      setResponse(result);
-      setTier(nextTier);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Search failed');
-    } finally {
-      setLoading(false);
-    }
+  function toggleTier(tier: SearchTier, on: boolean) {
+    setSelectedTiers((curr) => {
+      if (on && !curr.includes(tier)) return [...curr, tier].sort();
+      if (!on) return curr.filter((t) => t !== tier);
+      return curr;
+    });
   }
 
+  function setAll(on: boolean) {
+    setSelectedTiers(on ? [...ALL_TIERS] : []);
+  }
+
+  async function handleSubmit() {
+    const trimmed = query.trim();
+    if (!trimmed || selectedTiers.length === 0 || running) return;
+    setRunning(true);
+    const initial: Record<SearchTier, TierRun> = {} as Record<SearchTier, TierRun>;
+    for (const t of selectedTiers) initial[t] = { tier: t, status: 'pending' };
+    setRuns(initial);
+
+    await runTiers(trimmed, selectedTiers, (run) => {
+      setRuns((curr) => ({ ...curr, [run.tier]: run }));
+    });
+    setRunning(false);
+  }
+
+  const hasRun = Object.values(runs).length > 0;
+  const orderedRuns = selectedTiers.map((t) => runs[t]).filter(Boolean);
+
   return (
-    <div className="max-w-5xl mx-auto space-y-6">
+    <div className="flex h-full">
+      <main className="flex-1 flex flex-col min-w-0">
+        <div className="px-6 py-4 border-b flex items-center justify-between gap-4">
+          <div>
+            <h1 className="text-lg font-bold text-foreground">Yape Service Search</h1>
+            <p className="text-sm text-muted-foreground">
+              Compare search tiers side-by-side. Pick which ones to run, send a query.
+            </p>
+          </div>
+          <TierPicker
+            selected={selectedTiers}
+            onToggle={toggleTier}
+            onSetAll={setAll}
+          />
+        </div>
+
+        <div className="flex-1 overflow-auto px-6 py-6">
+          {!hasRun && (
+            <EmptyState
+              query={query}
+              setQuery={setQuery}
+              selectedTiers={selectedTiers}
+            />
+          )}
+
+          {hasRun && (
+            <div className="grid gap-4" style={{ gridTemplateColumns: `repeat(${orderedRuns.length}, minmax(260px, 1fr))` }}>
+              {orderedRuns.map((run) => (
+                <TierResultColumn key={run.tier} run={run} />
+              ))}
+            </div>
+          )}
+        </div>
+
+        <div className="border-t px-6 py-4 bg-card">
+          <div className="flex flex-wrap gap-2 mb-3">
+            {HERO_QUERIES.map((hero) => (
+              <button
+                key={hero}
+                type="button"
+                onClick={() => setQuery(hero)}
+                className="text-sm px-3 py-1.5 rounded-md bg-muted text-foreground hover:bg-accent transition-colors"
+              >
+                {hero}
+              </button>
+            ))}
+          </div>
+          <div className="flex items-end gap-3">
+            <Textarea
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+                  e.preventDefault();
+                  handleSubmit();
+                }
+              }}
+              placeholder="Ask Yape… e.g. quiero ahorrar"
+              className="flex-1 min-h-[56px] resize-none"
+              rows={2}
+            />
+            <Button
+              onClick={handleSubmit}
+              disabled={running || !query.trim() || selectedTiers.length === 0}
+              className="rounded-full w-12 h-12 p-0 shrink-0"
+              aria-label="Run search"
+            >
+              {running ? <Spinner /> : <ArrowRight />}
+            </Button>
+          </div>
+          <p className="text-xs text-muted-foreground mt-2">
+            ⌘/Ctrl + Enter to send · {selectedTiers.length} of 4 tiers selected
+          </p>
+        </div>
+      </main>
+
+      <RunDetailsSidebar runs={orderedRuns} />
+    </div>
+  );
+}
+
+function EmptyState({
+  query,
+  setQuery,
+  selectedTiers,
+}: {
+  query: string;
+  setQuery: (v: string) => void;
+  selectedTiers: SearchTier[];
+}) {
+  return (
+    <div className="max-w-2xl mx-auto mt-12 text-center space-y-6">
       <div>
-        <h2 className="text-2xl font-bold text-foreground">Yape Service Search</h2>
-        <p className="text-muted-foreground mt-1">
-          Compare four search maturity tiers — the hero moment is intent queries that fail on raw data.
+        <h2 className="text-3xl font-bold text-foreground mb-2">
+          Same query, different data.
+        </h2>
+        <p className="text-muted-foreground">
+          Pick tiers above and send a query. T0/T1 fail on intent phrasing — T2 succeeds
+          because the data is semantic, governed, and vectorized.
         </p>
       </div>
 
-      <Card className="shadow-lg border-[#742284]/20">
-        <CardHeader>
-          <CardTitle>Search</CardTitle>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          <div className="space-y-2">
-            <Label htmlFor="query">Query</Label>
-            <Input
-              id="query"
-              value={query}
-              onChange={(event) => setQuery(event.target.value)}
-              placeholder="Try: I want to save money"
-            />
-          </div>
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+        {selectedTiers.map((t) => (
+          <Card key={t}>
+            <CardHeader className="pb-2">
+              <CardTitle className="text-base flex items-center gap-2">
+                <Badge variant="outline">T{t}</Badge>
+                {TIER_LABELS[t]}
+              </CardTitle>
+            </CardHeader>
+            <CardContent>
+              <Skeleton className="h-3 w-full mb-2" />
+              <Skeleton className="h-3 w-3/4" />
+            </CardContent>
+          </Card>
+        ))}
+      </div>
 
-          <div className="flex flex-wrap gap-2">
-            {HERO_QUERIES.map((hero) => (
-              <Button key={hero} variant="outline" size="sm" onClick={() => setQuery(hero)}>
-                {hero}
-              </Button>
-            ))}
-          </div>
-
-          <div className="flex flex-wrap gap-2">
-            {TIERS.map((value) => (
-              <Button
-                key={value}
-                variant={tier === value ? 'default' : 'outline'}
-                size="sm"
-                className={tier === value ? 'bg-[#742284] hover:bg-[#5a1a68]' : ''}
-                disabled={loading}
-                onClick={() => handleSearch(value)}
-              >
-                {TIER_LABELS[value as keyof typeof TIER_LABELS]}
-              </Button>
-            ))}
-          </div>
-
-          <Button
-            className="bg-[#742284] hover:bg-[#5a1a68]"
-            disabled={loading || !query.trim()}
-            onClick={() => handleSearch()}
+      <div className="flex flex-wrap justify-center gap-2 pt-2">
+        {HERO_QUERIES.slice(0, 3).map((hero) => (
+          <button
+            key={hero}
+            type="button"
+            onClick={() => setQuery(hero)}
+            className={`text-sm px-3 py-1.5 rounded-md border transition-colors ${
+              query === hero ? 'border-primary text-primary' : 'border-border hover:bg-muted'
+            }`}
           >
-            {loading ? 'Searching…' : 'Run search'}
-          </Button>
-
-          {error && (
-            <div className="text-destructive bg-destructive/10 p-3 rounded-md text-sm">{error}</div>
-          )}
-        </CardContent>
-      </Card>
-
-      <Card className="shadow-lg">
-        <CardHeader className="flex flex-row items-center justify-between">
-          <CardTitle>Results</CardTitle>
-          {response && (
-            <Badge variant="secondary">{response.latency_ms} ms</Badge>
-          )}
-        </CardHeader>
-        <CardContent>
-          {loading && (
-            <div className="space-y-3">
-              <Skeleton className="h-16 w-full" />
-              <Skeleton className="h-16 w-full" />
-            </div>
-          )}
-
-          {!loading && response && response.results.length === 0 && (
-            <p className="text-muted-foreground">No matches — raw data often misses intent phrasing.</p>
-          )}
-
-          {!loading && response && response.results.length > 0 && (
-            <ul className="space-y-3">
-              {response.results.map((item: SearchResponse['results'][number]) => (
-                <li
-                  key={`${item.service_id}-${item.name}`}
-                  className="border rounded-lg p-4 flex gap-3 items-start"
-                >
-                  <span className="text-2xl">{item.icon ?? '🔎'}</span>
-                  <div className="min-w-0">
-                    <div className="font-semibold">{item.name}</div>
-                    <div className="text-sm text-muted-foreground">{item.category}</div>
-                    <div className="text-sm mt-1">{item.description}</div>
-                    {item.score != null && (
-                      <div className="text-xs text-muted-foreground mt-1">
-                        score: {item.score.toFixed(3)}
-                      </div>
-                    )}
-                  </div>
-                </li>
-              ))}
-            </ul>
-          )}
-
-          {response?.trace_url && (
-            <p className="text-sm mt-4">
-              <a
-                href={response.trace_url}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="text-[#742284] underline underline-offset-4"
-              >
-                View Supervisor trace in MLflow →
-              </a>
-            </p>
-          )}
-        </CardContent>
-      </Card>
+            {hero}
+          </button>
+        ))}
+      </div>
     </div>
+  );
+}
+
+function ArrowRight() {
+  return (
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+      <line x1="5" y1="12" x2="19" y2="12" />
+      <polyline points="12 5 19 12 12 19" />
+    </svg>
+  );
+}
+
+function Spinner() {
+  return (
+    <svg className="animate-spin" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
+      <path d="M21 12a9 9 0 1 1-6.219-8.56" />
+    </svg>
   );
 }

@@ -22,6 +22,9 @@ resources:
       budget_policy_id: ${var.budget_policy_id}
       user_api_scopes:
         - sql
+        - serving.serving-endpoints
+        - vectorsearch.vector-search-indexes
+        - ai-gateway
 
       resources:
         - name: sql-warehouse
@@ -52,6 +55,11 @@ resources:
             securable_type: FUNCTION
             securable_full_name: ${var.catalog}.${var.schema}.search_yape_services
             permission: EXECUTE
+
+        - name: opus-endpoint
+          serving_endpoint:
+            name: databricks-claude-opus-4-7
+            permission: CAN_QUERY
 
 targets:
   dev:
