@@ -1,8 +1,12 @@
 """Run vibe and AI-ready agents in parallel and stream SSE events.
 
-Each agent runs as a `claude_agent_sdk.query()` session. The vibe agent gets one
-tool (`execute_sql`); the AI-ready agent gets three governed UC-function tools.
-Both run against the Databricks AI Gateway via `auth.gateway_env()`.
+Each agent runs as a `ClaudeSDKClient` session against the Databricks AI Gateway
+via `auth.gateway_env()`. The vibe agent gets one tool (`execute_sql`); the
+AI-ready agent gets three governed UC-function tools.
+
+`ClaudeSDKClient` (not the top-level `query()` helper) is required for MLflow
+autolog — see `tracing.py` and the Databricks Claude Code docs. Don't switch
+back to `query()` without re-adding manual span instrumentation.
 
 The runner emits these event types per agent:
   - session_start  {agent}
@@ -24,9 +28,9 @@ from typing import Any, AsyncIterator, Literal
 from claude_agent_sdk import (
     AssistantMessage,
     ClaudeAgentOptions,
+    ClaudeSDKClient,
     ResultMessage,
     UserMessage,
-    query,
 )
 
 from .auth import gateway_env
@@ -36,7 +40,6 @@ from .tools import (
     VIBE_ALLOWED,
     VIBE_TOOLS,
 )
-from .tracing import emit_agent_trace
 
 
 AgentKind = Literal["vibe", "ready"]
@@ -147,99 +150,84 @@ async def _run_one(
     started = time.monotonic()
     await out.put({"type": "session_start", "agent": agent, "ts": started})
     num_tool_calls = 0
-    # Buffer the run's events for trace emission after the session completes.
-    buffered: list[dict[str, Any]] = []
     final_text_parts: list[str] = []
 
-    async def emit(evt: dict[str, Any]) -> None:
-        buffered.append(evt)
-        await out.put(evt)
-
+    # ClaudeSDKClient (not query()) is what mlflow.anthropic.autolog patches —
+    # tokens, tool calls, timing all land on the autologged trace.
+    #
+    # CRITICAL: the autolog wraps receive_response() so that `process_sdk_messages`
+    # only fires AFTER the wrapped generator's `async for` loop completes
+    # naturally. Returning out of this caller-side loop early triggers
+    # GeneratorExit and the trace is never created — so we drain the iterator
+    # to completion and signal end-of-stream via a flag instead of `return`.
     try:
-        async for msg in query(prompt=user_query, options=_options(agent, model)):
-            if isinstance(msg, AssistantMessage):
-                for block in msg.content:
-                    btype = type(block).__name__
-                    if btype == "TextBlock" and getattr(block, "text", ""):
-                        final_text_parts.append(block.text)
-                        await emit({
-                            "type": "text_delta",
-                            "agent": agent,
-                            "text": block.text,
-                        })
-                    elif btype == "ToolUseBlock":
-                        num_tool_calls += 1
-                        short = getattr(block, "name", "")
-                        if "__" in short:
-                            short = short.split("__")[-1]
-                        await emit({
-                            "type": "tool_call",
-                            "agent": agent,
-                            "tool": short,
-                            "args": getattr(block, "input", {}),
-                            "call_id": getattr(block, "id", ""),
-                        })
-            elif isinstance(msg, UserMessage):
-                # Tool results come back as UserMessage with ToolResultBlock content.
-                content = msg.content if isinstance(msg.content, list) else []
-                for block in content:
-                    if type(block).__name__ == "ToolResultBlock":
-                        output = _extract_tool_result_text(getattr(block, "content", ""))
-                        await emit({
-                            "type": "tool_result",
-                            "agent": agent,
-                            "call_id": getattr(block, "tool_use_id", ""),
-                            "output": output,
-                            "is_error": bool(getattr(block, "is_error", False)),
-                        })
-            elif isinstance(msg, ResultMessage):
-                latency_ms = int((time.monotonic() - started) * 1000)
-                usage = msg.usage or {}
-                tokens = int(
-                    usage.get("total_tokens")
-                    or (usage.get("input_tokens", 0) + usage.get("output_tokens", 0))
-                )
-                cost = float(msg.total_cost_usd or 0.0)
-                final_answer = "\n".join(final_text_parts).strip()
-                await emit({
-                    "type": "done",
-                    "agent": agent,
-                    "tokens": tokens,
-                    "cost_usd": cost,
-                    "latency_ms": latency_ms,
-                    "num_tool_calls": num_tool_calls,
-                })
-                emit_agent_trace(
-                    agent=agent,
-                    model=model,
-                    query=user_query,
-                    final_answer=final_answer,
-                    events=buffered,
-                    tokens=tokens,
-                    cost_usd=cost,
-                    latency_ms=latency_ms,
-                )
-                return
+        async with ClaudeSDKClient(options=_options(agent, model)) as client:
+            await client.query(user_query)
+            async for msg in client.receive_response():
+                if isinstance(msg, AssistantMessage):
+                    for block in msg.content:
+                        btype = type(block).__name__
+                        if btype == "TextBlock" and getattr(block, "text", ""):
+                            final_text_parts.append(block.text)
+                            await out.put({
+                                "type": "text_delta",
+                                "agent": agent,
+                                "text": block.text,
+                            })
+                        elif btype == "ToolUseBlock":
+                            num_tool_calls += 1
+                            full = getattr(block, "name", "")
+                            short = full.split("__")[-1] if "__" in full else full
+                            await out.put({
+                                "type": "tool_call",
+                                "agent": agent,
+                                "tool": short,
+                                "args": getattr(block, "input", {}),
+                                "call_id": getattr(block, "id", ""),
+                            })
+                elif isinstance(msg, UserMessage):
+                    # Tool results come back as UserMessage with ToolResultBlock content.
+                    content = msg.content if isinstance(msg.content, list) else []
+                    for block in content:
+                        if type(block).__name__ == "ToolResultBlock":
+                            output = _extract_tool_result_text(getattr(block, "content", ""))
+                            await out.put({
+                                "type": "tool_result",
+                                "agent": agent,
+                                "call_id": getattr(block, "tool_use_id", ""),
+                                "output": output,
+                                "is_error": bool(getattr(block, "is_error", False)),
+                            })
+                elif isinstance(msg, ResultMessage):
+                    latency_ms = int((time.monotonic() - started) * 1000)
+                    usage = msg.usage or {}
+                    tokens = int(
+                        usage.get("total_tokens")
+                        or (usage.get("input_tokens", 0) + usage.get("output_tokens", 0))
+                    )
+                    cost = float(msg.total_cost_usd or 0.0)
+                    await out.put({
+                        "type": "done",
+                        "agent": agent,
+                        "tokens": tokens,
+                        "cost_usd": cost,
+                        "latency_ms": latency_ms,
+                        "num_tool_calls": num_tool_calls,
+                    })
+                    # Do NOT `return` here — the autolog's wrapped
+                    # receive_response only emits the trace after its own loop
+                    # exits naturally. ResultMessage is the last message the
+                    # underlying generator yields, so the loop will end on the
+                    # next iteration on its own.
     except Exception as exc:
         latency_ms = int((time.monotonic() - started) * 1000)
         err_msg = f"{type(exc).__name__}: {exc}"
-        await emit({
+        await out.put({
             "type": "error",
             "agent": agent,
             "message": err_msg,
             "latency_ms": latency_ms,
         })
-        emit_agent_trace(
-            agent=agent,
-            model=model,
-            query=user_query,
-            final_answer="\n".join(final_text_parts).strip(),
-            events=buffered,
-            tokens=0,
-            cost_usd=0.0,
-            latency_ms=latency_ms,
-            error=err_msg,
-        )
 
 
 async def stream_both(
