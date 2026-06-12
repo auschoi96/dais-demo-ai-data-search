@@ -55,7 +55,7 @@ def ensure_endpoint(w: WorkspaceClient) -> None:
         print(f"Creating endpoint: {VS_ENDPOINT}")
         w.vector_search_endpoints.create_endpoint(
             name=VS_ENDPOINT,
-            endpoint_type=EndpointType.STORAGE_OPTIMIZED,
+            endpoint_type=EndpointType.STANDARD,
         )
     wait_for_endpoint(w, VS_ENDPOINT)
 

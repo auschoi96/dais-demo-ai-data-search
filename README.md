@@ -92,46 +92,44 @@ Workspace previews to enable (Admin Console → Previews — verify with `python
 - `ai-gateway`
 - `mcp.functions` *(the scope `uc_function` tool calls actually require — see notes for the `unity-catalog` red-herring)*
 
-You also need an existing **MLflow experiment** both agents trace into. The DABs bundle grants the app `CAN_EDIT` on the experiment ID supplied via the `mlflow_experiment_id` variable (default `2177684156462207` = `/Users/austin.choi@databricks.com/dais-demo-ai-data-ready`). Create the experiment first via the MLflow UI or `mlflow experiments create -n /Users/<you>/<name>` — the deploy fails fast if the ID doesn't resolve.
+The **MLflow experiment** both agents trace into is a bundle resource (`resources.experiments.yape_experiment`) — fresh workspaces need no manual pre-creation. If the experiment already exists (e.g. the dev/dais-demo targets), bind it once so deploys update it instead of creating a duplicate:
+
+```bash
+databricks bundle deployment bind yape_experiment <EXPERIMENT_ID> --target <target> --auto-approve
+```
 
 ### 1. Authenticate
 
 ```bash
 databricks auth login --host https://YOUR-WORKSPACE.cloud.databricks.com
-export DATABRICKS_WAREHOUSE_ID=YOUR_WAREHOUSE_ID
 ```
 
-### 2. Provision data + governance (one-time, ~10 min)
-
-```bash
-pip install -r setup/requirements.txt
-
-python setup/1_create_uc_tables.py        # services + users + eval + 8k transactions
-python setup/2_create_vector_indexes.py   # VS endpoint + 2 indexes (~5–15 min)
-python setup/3_register_uc_functions.py   # 6 UC functions (agent tools)
-python setup/4_create_metric_views.py     # 3 metric views + user_segments
-```
-
-Optional: regenerate the synthetic transactions before step 1:
-
-```bash
-python setup/generate_transactions.py     # writes data/transactions.jsonl
-```
-
-### 3. Build + deploy
+### 2. Build + deploy everything (one bundle)
 
 ```bash
 npm install && npm run build:client       # produces client/dist/
 
 databricks bundle validate --target dev
+databricks bundle deploy --target dev
 
-# If the app already exists in the workspace, bind first:
-databricks bundle deployment bind app dais-demo-ai-data-search --target dev --auto-approve
+# Provision UC tables + seed data, metric views, the VS endpoint + indexes
+# (~5–20 min on a fresh endpoint), and the 6 UC functions — all idempotent:
+databricks bundle run yape_setup_job --target dev
 
-databricks bundle deploy --target dev --auto-approve
-databricks apps deploy dais-demo-ai-data-search \
-  --source-code-path /Workspace/Users/$(whoami)@YOUR.com/.bundle/dais-demo-ai-data-search/dev/files
+# On a brand-new workspace the first deploy can fail creating the app because
+# its UC grants reference objects the setup job hadn't created yet. Re-deploy
+# once after the job finishes, then start the app:
+databricks bundle deploy --target dev
+databricks bundle run app --target dev
 ```
+
+Optional: regenerate the synthetic transactions before deploying (the seed JSONL is checked into `data/`):
+
+```bash
+python setup/generate_transactions.py     # writes data/transactions.jsonl
+```
+
+The setup scripts also run standalone (`pip install -r setup/requirements.txt`, `export DATABRICKS_WAREHOUSE_ID=...`, then `python setup/1_create_uc_tables.py` etc. in order 1 → 4 → 2 → 3); the bundle job passes per-target values as `KEY=VALUE` args.
 
 The Apps runtime detects `requirements.txt` + the `uvicorn` command in `app.yaml` and runs the Python service. The npm build still runs during the build phase because `package.json` is present; that's harmless — only the Vite client build matters at runtime.
 
@@ -152,11 +150,13 @@ npm run dev:client     # if configured; otherwise just npm run build:client and 
 
 | Variable | Default | Description |
 |---|---|---|
-| `catalog` | `ac_demo` | UC catalog for demo tables |
-| `schema` | `agents` | UC schema |
+| `catalog` | `ac_demo` | UC catalog for demo tables (app reads it as `DEMO_CATALOG`) |
+| `schema` | `agents` | UC schema (app reads it as `DEMO_SCHEMA`) |
 | `sql_warehouse_id` | *(required per target)* | Warehouse the app uses for `execute_sql` and the UC functions |
-| `budget_policy_id` | *(per-target)* | Required for some workspaces' app updates |
-| `mlflow_experiment_id` | `2177684156462207` | Experiment both agents trace into. Must already exist; bundle grants `CAN_EDIT`. |
+| `budget_policy_id` | `""` | Optional; referenced only by dev/prod app overrides |
+| `mlflow_experiment_name` | `/Users/<you>/dais-demo-ai-data-search` | Experiment path; managed as a bundle resource, bind existing ones |
+| `vs_endpoint` | `yape-demo-vs-endpoint` | Vector Search endpoint (created by the setup job if missing) |
+| `embedding_model` | `databricks-gte-large-en` | Embedding endpoint for the delta-sync indexes |
 
 ---
 

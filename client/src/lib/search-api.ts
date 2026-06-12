@@ -150,13 +150,13 @@ export async function streamAgents(
 
 export const AGENT_META: Record<AgentKind, { label: string; blurb: string; tools: string[] }> = {
   vibe: {
-    label: 'Vibe-Coded Agent',
-    blurb: 'One tool: raw SQL against the warehouse. Must discover the schema itself.',
+    label: 'General Purpose Agent',
+    blurb: 'an out of the box claude code agent with no enrichment',
     tools: ['execute_sql (raw SQL runner)'],
   },
   ready: {
     label: 'AI-Ready Agent',
-    blurb: 'Vector search + governed metric-view tools + raw SQL fallback.',
+    blurb: 'an enriched claude code agent powered by Data Intelligence',
     tools: [
       'search_yape_services_enriched (VS)',
       'list_services_by_category',

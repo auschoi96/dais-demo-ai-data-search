@@ -17,8 +17,8 @@ from claude_agent_sdk import create_sdk_mcp_server, tool
 from databricks.sdk import WorkspaceClient
 
 
-CATALOG = "ac_demo"
-SCHEMA = "agents"
+CATALOG = os.environ.get("DEMO_CATALOG") or "ac_demo"
+SCHEMA = os.environ.get("DEMO_SCHEMA") or "agents"
 WAREHOUSE_ID = os.environ.get("DATABRICKS_WAREHOUSE_ID") or "01370556fad60fda"
 
 _w: WorkspaceClient | None = None
@@ -206,19 +206,19 @@ def _canonicalize(name: str, valid: set[str]) -> str | None:
         "    measures: distinct_users, total_transactions, total_volume_pen, avg_ticket_pen\n\n"
         "Examples:\n"
         "  Top services in Lima:\n"
-        "    view_name='ac_demo.agents.yape_service_adoption',\n"
+        f"    view_name='{CATALOG}.{SCHEMA}.yape_service_adoption',\n"
         "    dimensions=['service_id'], measures=['distinct_users'],\n"
         "    filters={'region': 'Lima'}\n"
         "  Avg ticket for s01 by age cohort:\n"
-        "    view_name='ac_demo.agents.yape_avg_ticket',\n"
+        f"    view_name='{CATALOG}.{SCHEMA}.yape_avg_ticket',\n"
         "    dimensions=['age_cohort'], measures=['avg_ticket_pen'],\n"
         "    filters={'service_id': 's01'}\n"
         "  What heavy users use most:\n"
-        "    view_name='ac_demo.agents.yape_segment_behavior',\n"
+        f"    view_name='{CATALOG}.{SCHEMA}.yape_segment_behavior',\n"
         "    dimensions=['service_id'], measures=['distinct_users'],\n"
         "    filters={'usage_tier': 'heavy'}\n"
         "  Lima vs Trujillo savings:\n"
-        "    view_name='ac_demo.agents.yape_service_adoption',\n"
+        f"    view_name='{CATALOG}.{SCHEMA}.yape_service_adoption',\n"
         "    dimensions=['region', 'service_id'], measures=['distinct_users'],\n"
         "    filters={}   (then read both regions out of the result)\n\n"
         "Returns up to 50 rows sorted by the first measure descending. tier values "

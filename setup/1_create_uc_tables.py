@@ -9,9 +9,12 @@ from pathlib import Path
 from databricks.sdk import WorkspaceClient
 from databricks.sdk.service import catalog
 
+import _config
 from _config import FULL_SCHEMA, TABLES
 
-DATA_DIR = Path(__file__).resolve().parent.parent / "data"
+# Serverless spark_python_task exec()s this file without __file__; the
+# imported _config module always has one, and lives in the same directory.
+DATA_DIR = Path(_config.__file__).resolve().parent.parent / "data"
 
 
 def load_jsonl(path: Path) -> list[dict]:
@@ -59,6 +62,7 @@ def main() -> None:
           search_text STRING COMMENT 'Concatenated name + category + description for keyword search'
         ) USING DELTA
         COMMENT 'Raw Yape service catalog — vibe-coded baseline data'
+        TBLPROPERTIES ('delta.enableChangeDataFeed' = 'true')
         """,
     )
 
@@ -79,6 +83,7 @@ def main() -> None:
           embedding_text STRING COMMENT 'Combined text for Vector Search index'
         ) USING DELTA
         COMMENT 'AI-ready enriched Yape service catalog'
+        TBLPROPERTIES ('delta.enableChangeDataFeed' = 'true')
         """,
     )
 

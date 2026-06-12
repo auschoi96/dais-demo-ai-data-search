@@ -4,3 +4,5 @@ env:
     valueFrom: sql-warehouse
   - name: MLFLOW_EXPERIMENT_ID
     valueFrom: mlflow-experiment
+  - name: MLFLOW_TRACING_SQL_WAREHOUSE_ID
+    valueFrom: sql-warehouse

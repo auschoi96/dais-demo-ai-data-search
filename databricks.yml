@@ -11,21 +11,96 @@ variables:
   sql_warehouse_id:
     description: SQL warehouse ID for analytics queries and keyword search
   budget_policy_id:
-    description: Optional budget policy for existing apps (leave unset for new apps)
-  mlflow_experiment_id:
+    description: Optional budget policy. Referenced only by dev/prod resource overrides; dais-demo omits it.
+    default: ""
+  mlflow_experiment_name:
     description: |
-      Experiment ID both agents trace into. DABs grants the app CAN_EDIT on it
-      at deploy time; the experiment must already exist (the deploy fails with a
-      404 otherwise). Create it via the MLflow UI or `mlflow experiments create`.
-    default: "2177684156462207"
+      Workspace path of the MLflow experiment both agents trace into. Managed
+      as a bundle resource (resources.experiments.yape_experiment), so fresh
+      workspaces need no manual pre-creation. Existing targets are bound to
+      their pre-existing experiments via `databricks bundle deployment bind`.
+    default: /Users/${workspace.current_user.userName}/dais-demo-ai-data-search
+  vs_endpoint:
+    description: Vector Search endpoint name (created by the setup job if missing)
+    default: yape-demo-vs-endpoint
+  embedding_model:
+    description: Embedding model serving endpoint for the delta-sync indexes
+    default: databricks-gte-large-en
 
 resources:
+  experiments:
+    yape_experiment:
+      name: ${var.mlflow_experiment_name}
+
+  # Provisions everything the app depends on: UC tables + seed data, the
+  # user-segments view, metric views, the Vector Search endpoint + indexes,
+  # and the UC functions. Idempotent — safe to re-run. Fresh workspace flow:
+  #   databricks bundle deploy -t <target>        (app creation may fail if
+  #                                                UC objects don't exist yet)
+  #   databricks bundle run yape_setup_job -t <target>
+  #   databricks bundle deploy -t <target>        (re-run only if app failed)
+  #   databricks bundle run app -t <target>
+  jobs:
+    yape_setup_job:
+      name: yape-demo-setup
+      environments:
+        - environment_key: default
+          spec:
+            client: "2"
+            dependencies:
+              - databricks-sdk>=0.40.0
+      tasks:
+        - task_key: create_tables
+          environment_key: default
+          spark_python_task:
+            python_file: ./setup/1_create_uc_tables.py
+            parameters:
+              - CATALOG=${var.catalog}
+              - SCHEMA=${var.schema}
+              - WAREHOUSE_ID=${var.sql_warehouse_id}
+
+        - task_key: create_metric_views
+          depends_on:
+            - task_key: create_tables
+          environment_key: default
+          spark_python_task:
+            python_file: ./setup/4_create_metric_views.py
+            parameters:
+              - CATALOG=${var.catalog}
+              - SCHEMA=${var.schema}
+              - WAREHOUSE_ID=${var.sql_warehouse_id}
+
+        - task_key: create_vector_indexes
+          depends_on:
+            - task_key: create_tables
+          environment_key: default
+          spark_python_task:
+            python_file: ./setup/2_create_vector_indexes.py
+            parameters:
+              - CATALOG=${var.catalog}
+              - SCHEMA=${var.schema}
+              - VS_ENDPOINT=${var.vs_endpoint}
+              - EMBEDDING_MODEL=${var.embedding_model}
+
+        - task_key: register_functions
+          depends_on:
+            - task_key: create_metric_views
+            - task_key: create_vector_indexes
+          environment_key: default
+          spark_python_task:
+            python_file: ./setup/3_register_uc_functions.py
+            parameters:
+              - CATALOG=${var.catalog}
+              - SCHEMA=${var.schema}
+              - WAREHOUSE_ID=${var.sql_warehouse_id}
+
   apps:
     app:
       name: dais-demo-ai-data-search
       description: Yape AI-ready search demo — vibe coding vs AI-ready data
       source_code_path: ./
-      budget_policy_id: ${var.budget_policy_id}
+      # budget_policy_id is set per-target (dev/prod) below; the dais-demo
+      # workspace has no budget policies, so it is omitted there.
       user_api_scopes:
         - sql
         - serving.serving-endpoints
@@ -99,6 +174,20 @@ resources:
             securable_full_name: ${var.catalog}.${var.schema}.services_for_segment
             permission: EXECUTE
 
+        # The search functions run with invoker's rights, so the app SP also
+        # needs SELECT on the Vector Search index securables themselves.
+        - name: services-raw-index
+          uc_securable:
+            securable_type: TABLE
+            securable_full_name: ${var.catalog}.${var.schema}.yape_services_raw_idx
+            permission: SELECT
+
+        - name: services-enriched-index
+          uc_securable:
+            securable_type: TABLE
+            securable_full_name: ${var.catalog}.${var.schema}.yape_services_enriched_idx
+            permission: SELECT
+
         - name: opus-endpoint
           serving_endpoint:
             name: databricks-claude-opus-4-6
@@ -106,16 +195,16 @@ resources:
 
         - name: mlflow-experiment
           experiment:
-            experiment_id: ${var.mlflow_experiment_id}
+            experiment_id: ${resources.experiments.yape_experiment.id}
             permission: CAN_EDIT
 
 targets:
   dev:
     default: true
     mode: development
-    # Disable the default [dev <user>] name prefix so DABs binds to the
-    # already-existing experiment at mlflow_experiment_path (id 2177684156462207)
-    # instead of creating a parallel renamed copy each deploy.
+    # Disable the default [dev <user>] name prefix so resources keep their
+    # existing names (the experiment resource is bound to the pre-existing
+    # experiment 2177684156462207 — renaming it would orphan trace history).
     presets:
       name_prefix: ""
     workspace:
@@ -124,16 +213,65 @@ targets:
     variables:
       catalog: ac_demo
       schema: agents
-      sql_warehouse_id: "01370556fad60fda"
+      sql_warehouse_id: "862f1d757f0424f7"
       budget_policy_id: "5b62fa02-8671-46d3-96ac-64c1725dc9d9"
+      mlflow_experiment_name: /Users/austin.choi@databricks.com/dais-demo-ai-data-ready
+
+    resources:
+      apps:
+        app:
+          budget_policy_id: ${var.budget_policy_id}
 
   prod:
     mode: production
     workspace:
       host: https://e2-demo-field-eng.cloud.databricks.com
+      root_path: /Workspace/Users/austin.choi@databricks.com/.bundle/${bundle.name}/${bundle.target}
 
     variables:
       catalog: ac_demo
       schema: agents
-      sql_warehouse_id: "01370556fad60fda"
+      sql_warehouse_id: "862f1d757f0424f7"
       budget_policy_id: "5b62fa02-8671-46d3-96ac-64c1725dc9d9"
+      mlflow_experiment_name: /Users/austin.choi@databricks.com/dais-demo-ai-data-ready
+
+    resources:
+      apps:
+        app:
+          budget_policy_id: ${var.budget_policy_id}
+
+  # Migrated copy in the FE Vending Machine workspace. Data/tools live in
+  # austin_choi_omni_agent_catalog.agents (no ac_demo catalog there). The app's
+  # config is templated here (not app.yaml) so DEMO_CATALOG can vary per target;
+  # the backend reads DEMO_CATALOG / DEMO_SCHEMA at runtime.
+  dais-demo:
+    mode: development
+    presets:
+      name_prefix: ""
+    workspace:
+      host: https://fevm-austin-choi-omni-agent.cloud.databricks.com
+
+    variables:
+      catalog: austin_choi_omni_agent_catalog
+      schema: agents
+      sql_warehouse_id: "7d1d3dbb3ba65f2a"
+      # mlflow_experiment_name default already resolves to this workspace's
+      # existing experiment (/Users/austin.choi@databricks.com/dais-demo-ai-data-search,
+      # id 4356480922328957, bound via `bundle deployment bind`).
+
+    resources:
+      apps:
+        app:
+          config:
+            command: ["uvicorn", "agents_service.main:app", "--host", "0.0.0.0", "--port", "8000", "--app-dir", "python"]
+            env:
+              - name: DATABRICKS_WAREHOUSE_ID
+                value_from: sql-warehouse
+              - name: MLFLOW_EXPERIMENT_ID
+                value_from: mlflow-experiment
+              - name: MLFLOW_TRACING_SQL_WAREHOUSE_ID
+                value_from: sql-warehouse
+              - name: DEMO_CATALOG
+                value: ${var.catalog}
+              - name: DEMO_SCHEMA
+                value: ${var.schema}

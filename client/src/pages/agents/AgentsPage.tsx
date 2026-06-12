@@ -69,9 +69,9 @@ export function AgentsPage() {
           <div className="flex-1 min-w-0">
             <h1 className="text-lg font-bold text-foreground">Two agents, same query.</h1>
             <p className="text-sm text-muted-foreground mt-0.5">
-              Vibe-coded agent only has raw SQL — it has to discover the schema. AI-ready
-              agent calls governed metric views directly. Watch the tool-call count, wall
-              time, and tokens diverge.
+              The General purpose agent is not powered by Data Intelligence. Watch as the
+              AI-Ready Agent is able to use Data Intelligence to reduce tool-call count, wall
+              time and token usage.
             </p>
           </div>
           <div className="shrink-0 min-w-[180px]">

@@ -97,7 +97,7 @@ RETURN
     r.total_transactions,
     r.total_volume_pen
   FROM ranked r
-  LEFT JOIN ac_demo.agents.yape_services_enriched s ON s.service_id = r.service_id
+  LEFT JOIN {FULL_SCHEMA}.yape_services_enriched s ON s.service_id = r.service_id
   ORDER BY r.distinct_users DESC""",
 )
 

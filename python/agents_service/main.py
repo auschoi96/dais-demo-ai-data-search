@@ -18,7 +18,7 @@ from fastapi.staticfiles import StaticFiles
 from sse_starlette.sse import EventSourceResponse
 
 from .runner import stream_both
-from .tools import _run_sql
+from .tools import _run_sql, CATALOG, SCHEMA
 from .tracing import init_tracing
 
 
@@ -54,7 +54,7 @@ async def agents_stream(req: Request) -> EventSourceResponse:
 def services_raw() -> JSONResponse:
     result = _run_sql(
         "SELECT service_id, name, category, icon, description "
-        "FROM ac_demo.agents.yape_services_raw ORDER BY service_id"
+        f"FROM {CATALOG}.{SCHEMA}.yape_services_raw ORDER BY service_id"
     )
     return JSONResponse(result)
 
@@ -64,7 +64,7 @@ def services_enriched() -> JSONResponse:
     result = _run_sql(
         "SELECT service_id, name, category, icon, description, "
         "intent_tags, user_intent_phrases "
-        "FROM ac_demo.agents.yape_services_enriched ORDER BY service_id"
+        f"FROM {CATALOG}.{SCHEMA}.yape_services_enriched ORDER BY service_id"
     )
     return JSONResponse(result)
 

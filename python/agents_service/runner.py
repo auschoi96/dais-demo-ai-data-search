@@ -35,8 +35,10 @@ from claude_agent_sdk import (
 
 from .auth import gateway_env
 from .tools import (
+    CATALOG,
     READY_ALLOWED,
     READY_TOOLS,
+    SCHEMA,
     VIBE_ALLOWED,
     VIBE_TOOLS,
 )
@@ -65,9 +67,9 @@ def _extract_tool_result_text(payload: Any) -> str:
 
 VIBE_SYSTEM = (
     "You are a Yape fintech data analyst. You have ONE tool: `execute_sql` against "
-    "a Databricks SQL warehouse. The data lives in `ac_demo.agents`. You don't know "
-    "the schema — start by listing tables (e.g. `SHOW TABLES IN ac_demo.agents LIKE 'yape_%'`) "
-    "and describing the ones that look relevant (`DESCRIBE TABLE ac_demo.agents.yape_transactions`). "
+    f"a Databricks SQL warehouse. The data lives in `{CATALOG}.{SCHEMA}`. You don't know "
+    f"the schema — start by listing tables (e.g. `SHOW TABLES IN {CATALOG}.{SCHEMA} LIKE 'yape_%'`) "
+    f"and describing the ones that look relevant (`DESCRIBE TABLE {CATALOG}.{SCHEMA}.yape_transactions`). "
     "Then write the SQL you need to answer the question. If a query fails or returns "
     "nothing useful, try a different one. Show your work — narrate each query briefly. "
     "Answer in the user's language. Be honest if the data doesn't support a clean answer."
