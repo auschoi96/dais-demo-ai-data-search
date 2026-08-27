@@ -8,6 +8,7 @@ wrappers (no raw SQL).
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import time
@@ -58,6 +59,13 @@ def _run_sql(statement: str, *, timeout_s: str = "30s") -> dict[str, Any]:
     }
 
 
+async def _run_sql_async(statement: str, *, timeout_s: str = "30s") -> dict[str, Any]:
+    """Off-loop wrapper: _run_sql is a blocking sync HTTP call, and these tool
+    handlers execute on the uvicorn event loop — without to_thread, every agent
+    tool call stalls ALL requests (SSE, health, static) for up to 30s."""
+    return await asyncio.to_thread(_run_sql, statement, timeout_s=timeout_s)
+
+
 def _content(payload: Any) -> dict[str, Any]:
     """Wrap a Python dict as an MCP tool-content response."""
     return {"content": [{"type": "text", "text": json.dumps(payload, default=str)}]}
@@ -85,7 +93,7 @@ async def execute_sql(args: dict[str, Any]) -> dict[str, Any]:
     head = sql.lstrip().split(None, 1)[0].upper() if sql.lstrip() else ""
     if head in {"INSERT", "UPDATE", "DELETE", "DROP", "ALTER", "MERGE", "CREATE", "TRUNCATE"}:
         return _content({"ok": False, "error": f"Mutation not allowed ({head})"})
-    return _content(_run_sql(sql))
+    return _content(await _run_sql_async(sql))
 
 
 # ── AI-ready agent's three tools ──────────────────────────────────────────────
@@ -106,7 +114,7 @@ async def search_yape_services_enriched(args: dict[str, Any]) -> dict[str, Any]:
     if not q:
         return _content({"ok": False, "error": "query is required"})
     sql = f"SELECT * FROM {CATALOG}.{SCHEMA}.search_yape_services_enriched('{q}')"
-    return _content(_run_sql(sql))
+    return _content(await _run_sql_async(sql))
 
 
 @tool(
@@ -124,7 +132,7 @@ async def top_services_by_region(args: dict[str, Any]) -> dict[str, Any]:
     if not region:
         return _content({"ok": False, "error": "region is required"})
     sql = f"SELECT * FROM {CATALOG}.{SCHEMA}.top_services_by_region('{region}', {months_back})"
-    return _content(_run_sql(sql))
+    return _content(await _run_sql_async(sql))
 
 
 @tool(
@@ -142,7 +150,7 @@ async def avg_ticket_by_cohort(args: dict[str, Any]) -> dict[str, Any]:
     if not sid:
         return _content({"ok": False, "error": "service_id is required"})
     sql = f"SELECT * FROM {CATALOG}.{SCHEMA}.avg_ticket_by_cohort('{sid}')"
-    return _content(_run_sql(sql))
+    return _content(await _run_sql_async(sql))
 
 
 # Whitelisted metric views the generic introspector can query. The agent can
@@ -292,7 +300,7 @@ async def query_metric_view(args: dict[str, Any]) -> dict[str, Any]:
         f"FROM {view} {where_clause} {group_clause} "
         f"ORDER BY {order_target} DESC LIMIT 50"
     )
-    return _content(_run_sql(sql))
+    return _content(await _run_sql_async(sql))
 
 
 @tool(
@@ -310,7 +318,7 @@ async def list_services_by_category(args: dict[str, Any]) -> dict[str, Any]:
     if not cat:
         return _content({"ok": False, "error": "category is required"})
     sql = f"SELECT * FROM {CATALOG}.{SCHEMA}.list_services_by_category('{cat}')"
-    return _content(_run_sql(sql))
+    return _content(await _run_sql_async(sql))
 
 
 @tool(
@@ -330,7 +338,7 @@ async def services_for_segment(args: dict[str, Any]) -> dict[str, Any]:
     u_sql = f"'{u}'" if u else "NULL"
     v_sql = f"'{v}'" if v else "NULL"
     sql = f"SELECT * FROM {CATALOG}.{SCHEMA}.services_for_segment({u_sql}, {v_sql})"
-    return _content(_run_sql(sql))
+    return _content(await _run_sql_async(sql))
 
 
 @tool(
@@ -361,7 +369,7 @@ async def compare_regions_adoption(args: dict[str, Any]) -> dict[str, Any]:
       FROM b
       ORDER BY region, distinct_users DESC
     """
-    return _content(_run_sql(sql))
+    return _content(await _run_sql_async(sql))
 
 
 # ── MCP server registration ──────────────────────────────────────────────────
@@ -371,27 +379,38 @@ async def compare_regions_adoption(args: dict[str, Any]) -> dict[str, Any]:
 # and `permission_mode="bypassPermissions"` bypasses it — so the only reliable
 # way to keep Vibe out of the governed tools is to not register them on Vibe's
 # server in the first place.
+#
+# Servers are built PER RUN (not module-level singletons): an in-process SDK
+# MCP server multiplexes tool calls for the client that owns it, and sharing
+# one instance across concurrent ClaudeSDKClient runs cross-wires their tool
+# routing and hangs both under load.
 
-VIBE_TOOLS = create_sdk_mcp_server(
-    name="yape",
-    version="1.0.0",
-    tools=[execute_sql],
-)
 
-READY_TOOLS = create_sdk_mcp_server(
-    name="yape",
-    version="1.0.0",
-    tools=[
-        execute_sql,
-        search_yape_services_enriched,
-        list_services_by_category,
-        top_services_by_region,
-        compare_regions_adoption,
-        avg_ticket_by_cohort,
-        services_for_segment,
-        query_metric_view,
-    ],
-)
+def make_vibe_tools() -> Any:
+    """Fresh MCP server for one Vibe agent run (execute_sql only)."""
+    return create_sdk_mcp_server(
+        name="yape",
+        version="1.0.0",
+        tools=[execute_sql],
+    )
+
+
+def make_ready_tools() -> Any:
+    """Fresh MCP server for one AI-ready agent run (governed tools)."""
+    return create_sdk_mcp_server(
+        name="yape",
+        version="1.0.0",
+        tools=[
+            execute_sql,
+            search_yape_services_enriched,
+            list_services_by_category,
+            top_services_by_region,
+            compare_regions_adoption,
+            avg_ticket_by_cohort,
+            services_for_segment,
+            query_metric_view,
+        ],
+    )
 
 # Tool names as the SDK exposes them (mcp__<server>__<tool>).
 TOOL_EXECUTE_SQL = "mcp__yape__execute_sql"

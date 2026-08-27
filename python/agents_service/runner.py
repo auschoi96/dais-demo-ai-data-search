@@ -22,6 +22,8 @@ Events are interleaved by arrival time — both agents' progress streams togethe
 from __future__ import annotations
 
 import asyncio
+import logging
+import os
 import time
 from typing import Any, AsyncIterator, Literal
 
@@ -37,14 +39,33 @@ from .auth import gateway_env
 from .tools import (
     CATALOG,
     READY_ALLOWED,
-    READY_TOOLS,
     SCHEMA,
     VIBE_ALLOWED,
-    VIBE_TOOLS,
+    make_ready_tools,
+    make_vibe_tools,
 )
 
 
 AgentKind = Literal["vibe", "ready"]
+
+logger = logging.getLogger("agents_service.runner")
+
+# ── Run bounds ───────────────────────────────────────────────────────────────
+# Each user query spawns two claude CLI subprocesses + MLflow traces on a single
+# small Apps container. Unbounded concurrent runs were the root cause of the
+# app freezing after sustained use (leaked subprocesses / wedged event loop) —
+# cap concurrent requests, bound each agent's wall time, and cap agent turns.
+MAX_CONCURRENT_REQUESTS = int(os.environ.get("AGENTS_MAX_CONCURRENT_REQUESTS", "2"))
+AGENT_RUN_TIMEOUT_S = float(os.environ.get("AGENT_RUN_TIMEOUT_S", "240"))
+AGENT_MAX_TURNS = int(os.environ.get("AGENT_MAX_TURNS", "20"))
+
+_request_slots = asyncio.BoundedSemaphore(MAX_CONCURRENT_REQUESTS)
+_RUN_STATS = {"active": 0, "completed": 0, "rejected": 0, "timed_out": 0, "errored": 0}
+
+
+def run_stats() -> dict[str, int]:
+    """Snapshot of request counters for /api/health."""
+    return dict(_RUN_STATS)
 
 
 def _extract_tool_result_text(payload: Any) -> str:
@@ -124,21 +145,23 @@ def resolve_model(name: str | None) -> str:
     return SUPPORTED_MODELS.get(name, name)
 
 
-def _options(agent: AgentKind, model: str) -> ClaudeAgentOptions:
+def _options(agent: AgentKind, model: str, env: dict[str, str]) -> ClaudeAgentOptions:
     # Per-agent MCP server: Vibe's server only registers execute_sql, so the
     # governed tools are literally not in its context. `allowed_tools` adds a
-    # belt-and-suspenders permission allowlist on top.
-    server = VIBE_TOOLS if agent == "vibe" else READY_TOOLS
+    # belt-and-suspenders permission allowlist on top. The server is built fresh
+    # for THIS run — sharing one across concurrent runs cross-wires tool routing.
+    server = make_vibe_tools() if agent == "vibe" else make_ready_tools()
     allowed = VIBE_ALLOWED if agent == "vibe" else READY_ALLOWED
     system = VIBE_SYSTEM if agent == "vibe" else READY_SYSTEM
     return ClaudeAgentOptions(
         model=model,
+        max_turns=AGENT_MAX_TURNS,
         tools=[],  # strip all built-ins (Bash/Read/Edit/Write)
         mcp_servers={"yape": server},
         allowed_tools=allowed,
         permission_mode="bypassPermissions",
         system_prompt=system,
-        env=gateway_env(model),
+        env=env,
         setting_sources=[],
     )
 
@@ -162,74 +185,90 @@ async def _run_one(
     # naturally. Returning out of this caller-side loop early triggers
     # GeneratorExit and the trace is never created — so we drain the iterator
     # to completion and signal end-of-stream via a flag instead of `return`.
+    client: ClaudeSDKClient | None = None
     try:
-        async with ClaudeSDKClient(options=_options(agent, model)) as client:
-            await client.query(user_query)
-            async for msg in client.receive_response():
-                if isinstance(msg, AssistantMessage):
-                    for block in msg.content:
-                        btype = type(block).__name__
-                        if btype == "TextBlock" and getattr(block, "text", ""):
-                            final_text_parts.append(block.text)
-                            await out.put({
-                                "type": "text_delta",
-                                "agent": agent,
-                                "text": block.text,
-                            })
-                        elif btype == "ToolUseBlock":
-                            num_tool_calls += 1
-                            full = getattr(block, "name", "")
-                            short = full.split("__")[-1] if "__" in full else full
-                            await out.put({
-                                "type": "tool_call",
-                                "agent": agent,
-                                "tool": short,
-                                "args": getattr(block, "input", {}),
-                                "call_id": getattr(block, "id", ""),
-                            })
-                elif isinstance(msg, UserMessage):
-                    # Tool results come back as UserMessage with ToolResultBlock content.
-                    content = msg.content if isinstance(msg.content, list) else []
-                    for block in content:
-                        if type(block).__name__ == "ToolResultBlock":
-                            output = _extract_tool_result_text(getattr(block, "content", ""))
-                            await out.put({
-                                "type": "tool_result",
-                                "agent": agent,
-                                "call_id": getattr(block, "tool_use_id", ""),
-                                "output": output,
-                                "is_error": bool(getattr(block, "is_error", False)),
-                            })
-                elif isinstance(msg, ResultMessage):
-                    latency_ms = int((time.monotonic() - started) * 1000)
-                    usage = msg.usage or {}
-                    tokens = int(
-                        usage.get("total_tokens")
-                        or (usage.get("input_tokens", 0) + usage.get("output_tokens", 0))
-                    )
-                    cost = float(msg.total_cost_usd or 0.0)
-                    await out.put({
-                        "type": "done",
-                        "agent": agent,
-                        "tokens": tokens,
-                        "cost_usd": cost,
-                        "latency_ms": latency_ms,
-                        "num_tool_calls": num_tool_calls,
-                    })
-                    # Do NOT `return` here — the autolog's wrapped
-                    # receive_response only emits the trace after its own loop
-                    # exits naturally. ResultMessage is the last message the
-                    # underlying generator yields, so the loop will end on the
-                    # next iteration on its own.
+        # Blocking on OAuth cache miss — keep it off the event loop.
+        env = await asyncio.to_thread(gateway_env, model)
+        client = ClaudeSDKClient(options=_options(agent, model, env))
+        await client.connect()
+        await client.query(user_query)
+        async for msg in client.receive_response():
+            if isinstance(msg, AssistantMessage):
+                for block in msg.content:
+                    btype = type(block).__name__
+                    if btype == "TextBlock" and getattr(block, "text", ""):
+                        final_text_parts.append(block.text)
+                        await out.put({
+                            "type": "text_delta",
+                            "agent": agent,
+                            "text": block.text,
+                        })
+                    elif btype == "ToolUseBlock":
+                        num_tool_calls += 1
+                        full = getattr(block, "name", "")
+                        short = full.split("__")[-1] if "__" in full else full
+                        await out.put({
+                            "type": "tool_call",
+                            "agent": agent,
+                            "tool": short,
+                            "args": getattr(block, "input", {}),
+                            "call_id": getattr(block, "id", ""),
+                        })
+            elif isinstance(msg, UserMessage):
+                # Tool results come back as UserMessage with ToolResultBlock content.
+                content = msg.content if isinstance(msg.content, list) else []
+                for block in content:
+                    if type(block).__name__ == "ToolResultBlock":
+                        output = _extract_tool_result_text(getattr(block, "content", ""))
+                        await out.put({
+                            "type": "tool_result",
+                            "agent": agent,
+                            "call_id": getattr(block, "tool_use_id", ""),
+                            "output": output,
+                            "is_error": bool(getattr(block, "is_error", False)),
+                        })
+            elif isinstance(msg, ResultMessage):
+                latency_ms = int((time.monotonic() - started) * 1000)
+                usage = msg.usage or {}
+                tokens = int(
+                    usage.get("total_tokens")
+                    or (usage.get("input_tokens", 0) + usage.get("output_tokens", 0))
+                )
+                cost = float(msg.total_cost_usd or 0.0)
+                await out.put({
+                    "type": "done",
+                    "agent": agent,
+                    "tokens": tokens,
+                    "cost_usd": cost,
+                    "latency_ms": latency_ms,
+                    "num_tool_calls": num_tool_calls,
+                })
+                # Do NOT `return` here — the autolog's wrapped
+                # receive_response only emits the trace after its own loop
+                # exits naturally. ResultMessage is the last message the
+                # underlying generator yields, so the loop will end on the
+                # next iteration on its own.
     except Exception as exc:
         latency_ms = int((time.monotonic() - started) * 1000)
         err_msg = f"{type(exc).__name__}: {exc}"
+        _RUN_STATS["errored"] += 1
+        logger.warning("agent %s failed: %s", agent, err_msg)
         await out.put({
             "type": "error",
             "agent": agent,
             "message": err_msg,
             "latency_ms": latency_ms,
         })
+    finally:
+        # Explicit, bounded, cancellation-shielded teardown. `async with`
+        # relies on __aexit__ running cleanly *during* task cancellation; when
+        # it doesn't, the claude CLI subprocess leaks and keeps burning LLM
+        # calls — leaked processes accumulated and froze the app in the past.
+        if client is not None:
+            try:
+                await asyncio.shield(asyncio.wait_for(client.disconnect(), timeout=10))
+            except Exception as exc:
+                logger.warning("agent %s: disconnect issue: %s", agent, exc)
 
 
 async def stream_both(
@@ -237,11 +276,35 @@ async def stream_both(
 ) -> AsyncIterator[dict[str, Any]]:
     """Run both agents in parallel and yield SSE events as they arrive."""
     resolved = resolve_model(model)
+    try:
+        await asyncio.wait_for(_request_slots.acquire(), timeout=0.1)
+    except TimeoutError:
+        _RUN_STATS["rejected"] += 1
+        logger.info("rejecting query (demo at capacity): %r", user_query[:80])
+        for kind in ("vibe", "ready"):
+            yield {
+                "type": "error",
+                "agent": kind,
+                "message": "Demo is busy with another query — try again in a moment.",
+                "latency_ms": 0,
+            }
+        return
+    _RUN_STATS["active"] += 1
+    logger.info("run start (active=%d): %r", _RUN_STATS["active"], user_query[:80])
     out: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
 
     async def _runner(kind: AgentKind) -> None:
         try:
-            await _run_one(user_query, kind, resolved, out)
+            await asyncio.wait_for(_run_one(user_query, kind, resolved, out), timeout=AGENT_RUN_TIMEOUT_S)
+        except TimeoutError:
+            _RUN_STATS["timed_out"] += 1
+            logger.warning("agent %s timed out after %.0fs", kind, AGENT_RUN_TIMEOUT_S)
+            await out.put({
+                "type": "error",
+                "agent": kind,
+                "message": f"Timed out after {int(AGENT_RUN_TIMEOUT_S)}s",
+                "latency_ms": int(AGENT_RUN_TIMEOUT_S * 1000),
+            })
         finally:
             await out.put({"__sentinel__": kind})  # type: ignore[arg-type]
 
@@ -259,3 +322,9 @@ async def stream_both(
             if not t.done():
                 t.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
+        _request_slots.release()
+        _RUN_STATS["active"] -= 1
+        _RUN_STATS["completed"] += 1
+        logger.info(
+            "run end (active=%d, stats=%s)", _RUN_STATS["active"], _RUN_STATS
+        )

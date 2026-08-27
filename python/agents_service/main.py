@@ -17,7 +17,7 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from sse_starlette.sse import EventSourceResponse
 
-from .runner import stream_both
+from .runner import MAX_CONCURRENT_REQUESTS, run_stats, stream_both
 from .tools import _run_sql, CATALOG, SCHEMA
 from .tracing import init_tracing
 
@@ -81,7 +81,11 @@ def benchmark() -> JSONResponse:
 
 @app.get("/api/health")
 def health() -> dict:
-    return {"ok": True}
+    return {
+        "ok": True,
+        "max_concurrent_requests": MAX_CONCURRENT_REQUESTS,
+        "runs": run_stats(),
+    }
 
 
 if CLIENT_DIST.exists():

@@ -9,6 +9,8 @@ workspace's /ai-gateway/anthropic endpoint with `coding-agent-mode` on.
 from __future__ import annotations
 
 import os
+import time
+from typing import Any
 
 from databricks.sdk import WorkspaceClient
 
@@ -39,9 +41,30 @@ def _bearer_from_sdk() -> tuple[str, str]:
     return host, auth[len("Bearer ") :]
 
 
-def gateway_env(model: str = "databricks-claude-opus-4-6") -> dict[str, str]:
-    """Build the env block claude-agent-sdk needs to talk to the AI Gateway."""
+# SP OAuth tokens live ~60 min. Cache the bearer so each agent run doesn't pay
+# a blocking WorkspaceClient construction + OAuth exchange (and so the caller
+# can run this off the event loop only when a refresh is actually needed).
+_BEARER_TTL_S = 45 * 60
+_bearer_cache: dict[str, Any] = {"host": "", "bearer": "", "expires_mono": 0.0}
+
+
+def _host_bearer() -> tuple[str, str]:
+    """Return a cached (host, bearer), refreshing only when near expiry."""
+    now = time.monotonic()
+    if _bearer_cache["bearer"] and now < _bearer_cache["expires_mono"]:
+        return _bearer_cache["host"], _bearer_cache["bearer"]
     host, bearer = _bearer_from_sdk()
+    _bearer_cache.update(host=host, bearer=bearer, expires_mono=now + _BEARER_TTL_S)
+    return host, bearer
+
+
+def gateway_env(model: str = "databricks-claude-opus-4-6") -> dict[str, str]:
+    """Build the env block claude-agent-sdk needs to talk to the AI Gateway.
+
+    Blocking on cache miss (OAuth exchange) — call from a thread
+    (asyncio.to_thread) when on the event loop.
+    """
+    host, bearer = _host_bearer()
     env = {
         **os.environ,
         "ANTHROPIC_BASE_URL": f"{host}{GATEWAY_PATH}",
