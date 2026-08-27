@@ -188,6 +188,28 @@ resources:
             securable_full_name: ${var.catalog}.${var.schema}.yape_services_enriched_idx
             permission: SELECT
 
+        # The query_metric_view tool runs SELECT ... MEASURE(...) directly
+        # against these metric views as the app SP, so the SP needs SELECT on
+        # them. (The UC functions above read the same views under DEFINER
+        # rights and don't need these grants — only the direct-query tool does.)
+        - name: metric-service-adoption
+          uc_securable:
+            securable_type: TABLE
+            securable_full_name: ${var.catalog}.${var.schema}.yape_service_adoption
+            permission: SELECT
+
+        - name: metric-avg-ticket
+          uc_securable:
+            securable_type: TABLE
+            securable_full_name: ${var.catalog}.${var.schema}.yape_avg_ticket
+            permission: SELECT
+
+        - name: metric-segment-behavior
+          uc_securable:
+            securable_type: TABLE
+            securable_full_name: ${var.catalog}.${var.schema}.yape_segment_behavior
+            permission: SELECT
+
         - name: opus-endpoint
           serving_endpoint:
             name: databricks-claude-opus-4-6
@@ -267,10 +289,23 @@ targets:
             env:
               - name: DATABRICKS_WAREHOUSE_ID
                 value_from: sql-warehouse
+              # fevm's app compute can't reach the legacy trace-artifact storage
+              # host (us-east-1.storage.cloud.databricks.com — connection
+              # refused), which made the synchronous trace export block each
+              # request ~78s. Fix: point tracing at a UC-backed experiment
+              # (id 885209374738243, /Users/austin.choi@databricks.com/
+              # dais-demo-ai-data-search-uc) whose traces are written to UC Delta
+              # tables (austin_choi_omni_agent_catalog.agents.yape_traces_otel_*)
+              # via the reachable Databricks trace-ingestion path — no external
+              # storage egress, no blocking. The app SP has SELECT/MODIFY on
+              # those tables + CAN_EDIT on the experiment. This overrides the
+              # mlflow-experiment resource (workspace-storage-backed) for fevm.
               - name: MLFLOW_EXPERIMENT_ID
-                value_from: mlflow-experiment
+                value: "885209374738243"
               - name: MLFLOW_TRACING_SQL_WAREHOUSE_ID
                 value_from: sql-warehouse
+              - name: MLFLOW_ENABLE_ASYNC_TRACE_LOGGING
+                value: "true"
               - name: DEMO_CATALOG
                 value: ${var.catalog}
               - name: DEMO_SCHEMA
