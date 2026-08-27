@@ -187,8 +187,8 @@ npm run dev:client     # if configured; otherwise just npm run build:client and 
 
 | Role | Endpoint |
 |---|---|
-| Vibe + AI-Ready agents (default Opus) | `databricks-claude-opus-4-6` |
-| Sonnet option | `databricks-claude-sonnet-4-6` |
+| Vibe + AI-Ready agents (default Opus) | `databricks-claude-opus-5` |
+| Sonnet option | `databricks-claude-sonnet-5` |
 | Haiku option | `databricks-claude-haiku-4-5` |
 | Embeddings (Vector Search managed) | `databricks-qwen3-embedding-0-6b` |
 

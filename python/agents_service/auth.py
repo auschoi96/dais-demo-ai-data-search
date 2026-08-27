@@ -21,8 +21,8 @@ GATEWAY_PATH = "/ai-gateway/anthropic"
 # a model when the agent asks for "opus" or "sonnet" generically. We pin all
 # three so the Databricks gateway returns a model it actually serves.
 GATEWAY_MODELS = {
-    "ANTHROPIC_DEFAULT_OPUS_MODEL": "databricks-claude-opus-4-7",
-    "ANTHROPIC_DEFAULT_SONNET_MODEL": "databricks-claude-sonnet-4-6",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL": "databricks-claude-opus-5",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL": "databricks-claude-sonnet-5",
     "ANTHROPIC_DEFAULT_HAIKU_MODEL": "databricks-claude-haiku-4-5",
 }
 
@@ -58,7 +58,7 @@ def _host_bearer() -> tuple[str, str]:
     return host, bearer
 
 
-def gateway_env(model: str = "databricks-claude-opus-4-6") -> dict[str, str]:
+def gateway_env(model: str = "databricks-claude-opus-5") -> dict[str, str]:
     """Build the env block claude-agent-sdk needs to talk to the AI Gateway.
 
     Blocking on cache miss (OAuth exchange) — call from a thread

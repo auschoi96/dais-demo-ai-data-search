@@ -132,14 +132,14 @@ READY_SYSTEM = (
 
 
 SUPPORTED_MODELS = {
-    "opus": "databricks-claude-opus-4-6",
-    "sonnet": "databricks-claude-sonnet-4-6",
+    "opus": "databricks-claude-opus-5",
+    "sonnet": "databricks-claude-sonnet-5",
     "haiku": "databricks-claude-haiku-4-5",
 }
 
 
 def resolve_model(name: str | None) -> str:
-    """Accept short alias ('opus'), full id ('databricks-claude-opus-4-6'), or None."""
+    """Accept short alias ('opus'), full id ('databricks-claude-opus-5'), or None."""
     if not name:
         return SUPPORTED_MODELS["opus"]
     return SUPPORTED_MODELS.get(name, name)

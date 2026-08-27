@@ -74,8 +74,8 @@ export function reduceRuns(state: RunsState, evt: StreamEvent): RunsState {
 export type ModelChoice = 'opus' | 'sonnet' | 'haiku';
 
 export const MODEL_OPTIONS: { value: ModelChoice; label: string; detail: string }[] = [
-  { value: 'opus', label: 'Opus 4.6', detail: 'databricks-claude-opus-4-6 — most capable' },
-  { value: 'sonnet', label: 'Sonnet 4.6', detail: 'databricks-claude-sonnet-4-6 — balanced' },
+  { value: 'opus', label: 'Opus 5', detail: 'databricks-claude-opus-5 — most capable' },
+  { value: 'sonnet', label: 'Sonnet 5', detail: 'databricks-claude-sonnet-5 — balanced' },
   { value: 'haiku', label: 'Haiku 4.5', detail: 'databricks-claude-haiku-4-5 — fastest' },
 ];
 

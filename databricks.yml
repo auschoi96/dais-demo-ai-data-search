@@ -212,7 +212,7 @@ resources:
 
         - name: opus-endpoint
           serving_endpoint:
-            name: databricks-claude-opus-4-6
+            name: databricks-claude-opus-5
             permission: CAN_QUERY
 
         - name: mlflow-experiment
